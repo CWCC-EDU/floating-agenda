@@ -1,3 +1,8 @@
+## 代码与参考
+本项目由Kimi-K3.1pro与大肥鱼V4.1F生成。
+参考项目：https://github.com/yq04/Calendar-List
+
+
 # 浮屿 · 桌面透明日历
 
 浮屿是一款 Windows 桌面日历小程序。它像壁纸一样**贴在桌面上**，看日历、记待办都在桌面完成；其他窗口打开时会自然地盖在它上面，不挡你工作。
@@ -97,3 +102,6 @@ npm run dist       # 打包为便携版 exe（输出在 release/ 目录）
 ```
 
 技术栈：Electron + React + TypeScript + Vite，主进程代码在 `electron/`，界面代码在 `src/`。
+
+
+
