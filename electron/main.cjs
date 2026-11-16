@@ -8,7 +8,6 @@ let mainWindow = null;
 let tray = null;
 let currentFilter = 'all';
 let isQuitting = false;
-let desktopAttached = false;
 let latestSettings = {
   autoNumber: true,
   showWeekNumbers: true,
@@ -91,43 +90,36 @@ function attachToDesktop() {
       [DllImport("user32.dll", SetLastError = true)]
       public static extern IntPtr GetParent(IntPtr hWnd);
       [DllImport("user32.dll", SetLastError = true)]
-      public static extern bool EnumWindows(EnumWindowsProc lpEnumFunc, IntPtr lParam);
-      [DllImport("user32.dll", SetLastError = true)]
-      public static extern bool EnumChildWindows(IntPtr hWndParent, EnumWindowsProc lpEnumFunc, IntPtr lParam);
+      public static extern IntPtr GetWindow(IntPtr hWnd, uint uCmd);
       [DllImport("user32.dll", SetLastError = true, CharSet = CharSet.Unicode)]
       public static extern int GetClassName(IntPtr hWnd, StringBuilder lpClassName, int nMaxCount);
       [DllImport("user32.dll", SetLastError = true)]
-      public static extern bool IsWindowVisible(IntPtr hWnd);
-      public delegate bool EnumWindowsProc(IntPtr hWnd, IntPtr lParam);
+      public static extern IntPtr GetWindowLongPtr(IntPtr hWnd, int nIndex);
+      [DllImport("user32.dll", SetLastError = true)]
+      public static extern IntPtr SetWindowLongPtr(IntPtr hWnd, int nIndex, IntPtr dwNewLong);
     }';
-    $found = [System.Collections.Generic.List[object]]::new();
-    $defViewClass = 'SHELLDLL_DefView';
     $cal = [IntPtr]::new([int64]'${handle}');
     $progman = [DesktopHost]::FindWindow('Progman', [NullString]::Value);
-    if ($progman -ne [IntPtr]::Zero) {
-      $probe = { param($w, $l) $buf = [Text.StringBuilder]::new(256); [DesktopHost]::GetClassName($w, $buf, 256) | Out-Null; if ($buf.ToString() -eq $defViewClass) { $found.Add($w) }; return $true }.GetNewClosure();
-      [DesktopHost]::EnumChildWindows($progman, $probe, [IntPtr]::Zero) | Out-Null;
-    }
-    if ($found.Count -eq 0) {
-      $workerProbe = { param($w, $l) $buf = [Text.StringBuilder]::new(256); [DesktopHost]::GetClassName($w, $buf, 256) | Out-Null; if ($buf.ToString() -eq 'WorkerW') { $found.Add($w) }; return $true }.GetNewClosure();
-      [DesktopHost]::EnumWindows($workerProbe, [IntPtr]::Zero) | Out-Null;
-      $defFound = $false;
-      foreach ($w in $found) {
-        $probe2 = { param($ww, $ll) $buf = [Text.StringBuilder]::new(256); [DesktopHost]::GetClassName($ww, $buf, 256) | Out-Null; if ($buf.ToString() -eq $defViewClass) { $found.Add($ww) }; return $true }.GetNewClosure();
-        [DesktopHost]::EnumChildWindows($w, $probe2, [IntPtr]::Zero) | Out-Null;
-        if ($found.Count -gt 0) { $defFound = $true; break }
+    if ($progman -eq [IntPtr]::Zero) { Write-Output 'NO_PROGMAN'; exit 0 }
+    $child = [DesktopHost]::GetWindow($progman, 5);
+    $hostWnd = $progman;
+    while ($child -ne [IntPtr]::Zero) {
+      $buf = [Text.StringBuilder]::new(256);
+      [DesktopHost]::GetClassName($child, $buf, 256) | Out-Null;
+      if ($buf.ToString() -eq 'SHELLDLL_DefView') {
+        $parentOfDefView = [DesktopHost]::GetParent($child);
+        if ($parentOfDefView -ne [IntPtr]::Zero) { $hostWnd = $parentOfDefView }
+        break
       }
-      if (-not $defFound) { $found.Clear() }
+      $child = [DesktopHost]::GetWindow($child, 2);
     }
-    $def = [IntPtr]::Zero;
-    if ($found.Count -gt 0) { $def = [IntPtr]$found[$found.Count - 1] }
-    if ($def -eq [IntPtr]::Zero) { Write-Output 'NO_DEFVIEW'; exit 0 }
-    $hostWnd = [DesktopHost]::GetParent($def);
-    if ($hostWnd -eq [IntPtr]::Zero) { $hostWnd = $progman }
+    $style = [DesktopHost]::GetWindowLongPtr($cal, -16).ToInt64();
+    $style = ($style -band (-bnot 0x80000000)) -bor 0x40000000;
+    [DesktopHost]::SetWindowLongPtr($cal, -16, [IntPtr]::new($style)) | Out-Null;
     if ([DesktopHost]::GetParent($cal) -ne $hostWnd) {
       [DesktopHost]::SetParent($cal, $hostWnd) | Out-Null;
     }
-    [DesktopHost]::SetWindowPos($cal, $def, 0, 0, 0, 0, 0x0013) | Out-Null;
+    [DesktopHost]::SetWindowPos($cal, [IntPtr]::new(0), 0, 0, 0, 0, 0x0033) | Out-Null;
     Write-Output 'ATTACHED'
   `;
   const child = spawn('powershell.exe', [
@@ -142,11 +134,9 @@ function attachToDesktop() {
   child.stderr.on('data', (data) => { stderr += data.toString(); });
   child.on('error', (error) => console.error('Unable to attach calendar to desktop:', error));
   child.on('close', (code) => {
-    if (code === 0 && stdout.includes('ATTACHED')) {
-      desktopAttached = true;
-    } else {
-      if (code !== 0) console.error('Desktop attachment failed:', stderr || `exit ${code}`);
-      if (!desktopAttached) putWindowAtDesktopBottom();
+    if (code !== 0 || !stdout.includes('ATTACHED')) {
+      console.error('Desktop attachment failed:', stderr || stdout || `exit ${code}`);
+      putWindowAtDesktopBottom();
     }
   });
 }
@@ -154,7 +144,7 @@ function attachToDesktop() {
 function showWindow() {
   if (!mainWindow) return;
   if (mainWindow.isMinimized()) mainWindow.restore();
-  if (!mainWindow.isVisible()) mainWindow.showInactive();
+  if (!mainWindow.isVisible()) mainWindow.show();
   attachToDesktop();
 }
 
@@ -166,7 +156,8 @@ function minimizeWindow() {
 
 function toggleWindow() {
   if (!mainWindow) return;
-  if (mainWindow.isMinimized() || !mainWindow.isVisible()) showWindow();
+  const focused = mainWindow.isFocused() || mainWindow.webContents.isFocused();
+  if (mainWindow.isMinimized() || !mainWindow.isVisible() || !focused) showWindow();
   else minimizeWindow();
 }
 
@@ -338,7 +329,7 @@ function createWindow() {
 
   mainWindow.once('ready-to-show', attachToDesktop);
   mainWindow.on('show', attachToDesktop);
-  mainWindow.on('restore', attachToDesktop);
+  mainWindow.on('minimize', minimizeWindow);
   mainWindow.on('close', saveWindowBounds);
   mainWindow.webContents.on('render-process-gone', () => {
     if (!isQuitting && mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.reload();
@@ -353,7 +344,6 @@ function createWindow() {
   mainWindow.on('closed', () => {
     adjustment = null;
     mainWindow = null;
-    desktopAttached = false;
     if (!isQuitting) setTimeout(createWindow, 800);
   });
 }
@@ -426,7 +416,6 @@ ipcMain.handle('window:adjust-mode', (_event, enabled) => {
   if (!mainWindow || mainWindow.isDestroyed()) return;
   adjustment = null;
   mainWindow.setResizable(enabled === true);
-  if (!enabled) attachToDesktop();
 });
 
 ipcMain.handle('window:adjust-start', (_event, mode, resizeEdges) => {
@@ -480,7 +469,6 @@ ipcMain.handle('window:adjust-update', () => {
 ipcMain.handle('window:adjust-stop', () => {
   adjustment = null;
   saveWindowBounds();
-  attachToDesktop();
 });
 
 ipcMain.handle('window:quit', quitApp);
