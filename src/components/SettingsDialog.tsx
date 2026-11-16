@@ -1,7 +1,7 @@
 import { useState, type CSSProperties, type KeyboardEvent, type ReactNode } from 'react';
 import { CalendarDays, ChevronRight, Info, Keyboard, LayoutGrid, Monitor, RotateCcw, SlidersHorizontal, StickyNote, Type, X } from 'lucide-react';
 import { DEFAULT_SETTINGS } from '../lib/storage';
-import type { BulletStyle, CalendarLayout, FontFamily, Settings, SoundEffect, TextBackground, UpdateCheckResult } from '../types';
+import type { BulletStyle, CalendarLayout, DesktopIconLayer, EditorInputStyle, FontFamily, Settings, SoundEffect, TextBackground, UpdateCheckResult } from '../types';
 
 type Category = 'calendar' | 'cells' | 'appearance' | 'notes' | 'advanced' | 'about';
 type ShortcutKey = 'showHideShortcut' | 'toggleContentShortcut' | 'toggleNotesShortcut' | 'completeTaskShortcut';
@@ -33,6 +33,15 @@ const BULLETS: { value: BulletStyle; label: string }[] = [
   { value: 'none', label: '无项目符号' },
   { value: 'number', label: '项目数字编号' },
   { value: 'dot', label: '项目圆点' },
+];
+const EDITOR_STYLES: { value: EditorInputStyle; label: string }[] = [
+  { value: 'one-box', label: '一条式' },
+  { value: 'multi-row', label: '多条式' },
+];
+const ICON_LAYERS: { value: DesktopIconLayer; label: string }[] = [
+  { value: 'auto', label: '自动 · 悬停时日历置顶' },
+  { value: 'above', label: '图标常在上 · 日历可操作' },
+  { value: 'below', label: '日历常在上 · 图标透视' },
 ];
 const FONT_OPTIONS: { value: FontFamily; label: string }[] = [
   { value: 'Microsoft YaHei', label: '微软雅黑' },
@@ -208,9 +217,9 @@ export function SettingsDialog({ settings, isElectron, onChange, onClose, onOpen
               {category === 'calendar' && <>
                 <Section title="自定义样式">
                   <ChoiceCards value={settings.layout} options={LAYOUTS} kind="layout" onChange={(layout) => update({ layout })} />
-                  <SelectRow title="最大行数" value={settings.maxRows} options={numberOptions(1, 6)} disabled={settings.layout.includes('week')} onChange={(maxRows) => update({ maxRows })} />
+                  <SelectRow title="最大行数" description={settings.layout === 'full-month' ? '完整月份会自动补齐整月所需的 4–6 行' : undefined} value={settings.maxRows} options={numberOptions(1, 6)} disabled={settings.layout.includes('week') || settings.layout === 'full-month'} onChange={(maxRows) => update({ maxRows })} />
                   <SelectRow title="已过星期数" description="浮动月份保留今天之前的完整周数" value={settings.elapsedWeeks} options={numberOptions(0, 5)} disabled={settings.layout !== 'floating-month'} onChange={(elapsedWeeks) => update({ elapsedWeeks })} />
-                  <SelectRow title="最大列数" value={settings.maxColumns} options={numberOptions(1, 7)} onChange={(maxColumns) => update({ maxColumns })} />
+                  <SelectRow title="最大列数" description={settings.layout === 'full-month' ? '完整月份固定使用 7 列，显示完整周' : undefined} value={settings.maxColumns} options={numberOptions(1, 7)} disabled={settings.layout === 'full-month'} onChange={(maxColumns) => update({ maxColumns })} />
                 </Section>
                 <Section title="显示效果">
                   <ToggleRow title="毛玻璃特效" checked={settings.blurEnabled} onChange={(blurEnabled) => update({ blurEnabled })} />
@@ -263,6 +272,7 @@ export function SettingsDialog({ settings, isElectron, onChange, onClose, onOpen
                 <Section title="文字的字体颜色和大小">
                   <FontRow title="日历日期" family={settings.calendarFontFamily} size={settings.calendarFontSize} color={settings.calendarTextColor} onFamily={(calendarFontFamily) => update({ calendarFontFamily })} onSize={(calendarFontSize) => update({ calendarFontSize })} onColor={(calendarTextColor) => update({ calendarTextColor })} />
                   <FontRow title="编辑内容" family={settings.editorFontFamily} size={settings.editorFontSize} color={settings.editorTextColor} onFamily={(editorFontFamily) => update({ editorFontFamily })} onSize={(editorFontSize) => update({ editorFontSize })} onColor={(editorTextColor) => update({ editorTextColor })} />
+                  <SelectRow title="输入框样式" description="一条式：单个文本框，每行一项；多条式：每项独立输入框" value={settings.editorInputStyle} options={EDITOR_STYLES} onChange={(editorInputStyle) => update({ editorInputStyle })} />
                   <ToggleRow title="任务文字随背景自动配色" description="按背景明暗自动选择高对比度文字" checked={settings.taskAdaptiveColor} onChange={(taskAdaptiveColor) => update({ taskAdaptiveColor })} />
                   {!settings.taskAdaptiveColor && <ColorRow title="任务文字颜色" value={settings.taskTextColor} onChange={(taskTextColor) => update({ taskTextColor })} />}
                 </Section>
@@ -310,6 +320,7 @@ export function SettingsDialog({ settings, isElectron, onChange, onClose, onOpen
                 </Section>
                 <Section title="软件设置">
                   <SelectRow title="语言" value={settings.language} options={[{ value: 'zh-CN' as const, label: '中国大陆 · 简体中文' }]} onChange={(language) => update({ language })} />
+                  <SelectRow title="桌面图标层级" description="自动：悬停时日历置顶；图标常在上：图标始终可见，日历仍可点击输入；日历常在上：图标透过日历显示，日历优先响应点击" value={settings.desktopIconLayer} options={ICON_LAYERS} disabled={!isElectron} onChange={(desktopIconLayer) => update({ desktopIconLayer })} />
                   <ToggleRow title="代理设置" description="仅用于应用自身的更新检查，不上传任务内容" checked={settings.proxyEnabled} disabled={!isElectron} onChange={(proxyEnabled) => update({ proxyEnabled })} />
                   {settings.proxyEnabled && <label className="proxy-input-row"><span>代理服务器</span><input value={settings.proxyServer} placeholder="例如 127.0.0.1:7890" onChange={(event) => update({ proxyServer: event.target.value })} /></label>}
                   <ToggleRow title="跟随 Windows 启动" description="使用当前便携 EXE 注册本机登录启动项" checked={settings.autoStartEnabled} disabled={!isElectron} onChange={(autoStartEnabled) => update({ autoStartEnabled })} />

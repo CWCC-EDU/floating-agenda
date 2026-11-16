@@ -3,7 +3,7 @@ import { CalendarDays, Check, ChevronDown, ChevronLeft, ChevronRight, ListChecks
 import { DayEditorDialog } from './components/DayEditorDialog';
 import { NotesPanel } from './components/NotesPanel';
 import { SettingsDialog } from './components/SettingsDialog';
-import { addMonths, festivalLabel, fromDateKey, fullDateLabel, getCalendarDays, getWeekNumber, lunarDateLabel, monthLabel, shortDateLabel, solarTermLabel, startOfMonth, toDateKey, yiJiLabel } from './lib/date';
+import { addMonths, festivalLabel, fromDateKey, fullDateLabel, getCalendarColumns, getCalendarDays, getWeekNumber, lunarDateLabel, monthLabel, shortDateLabel, solarTermLabel, startOfMonth, toDateKey, yiJiLabel } from './lib/date';
 import { appendNextRecurringTask, rolloverTasks, sortTasks } from './lib/tasks';
 import { DEFAULT_SETTINGS, loadAppState, saveAppState } from './lib/storage';
 import { readableTextColor, taskFontSize } from './lib/appearance';
@@ -32,6 +32,33 @@ export default function App() {
   const adjustmentPointer = useRef<number | null>(null);
   const notifiedTasks = useRef(new Set<string>());
   const isElectron = Boolean(window.desktop);
+
+  useEffect(() => {
+    if (!isElectron) return;
+    void window.desktop?.setInteractionActive(showSettings || Boolean(editor));
+  }, [editor, isElectron, showSettings]);
+
+  useEffect(() => {
+    if (!isElectron) return;
+    const requestFocus = (event: globalThis.PointerEvent) => {
+      const target = event.target as HTMLElement | null;
+      const editable = target?.closest<HTMLElement>('input, textarea, [contenteditable="true"]');
+      if (editable) {
+        editable.focus({ preventScroll: true });
+        if (editable.isContentEditable) {
+          const range = document.caretRangeFromPoint?.(event.clientX, event.clientY);
+          if (range && editable.contains(range.startContainer)) {
+            const selection = window.getSelection();
+            selection?.removeAllRanges();
+            selection?.addRange(range);
+          }
+        }
+      }
+      void window.desktop?.focusWindow();
+    };
+    window.addEventListener('pointerdown', requestFocus, true);
+    return () => window.removeEventListener('pointerdown', requestFocus, true);
+  }, [isElectron]);
 
   useEffect(() => {
     let active = true;
@@ -140,8 +167,9 @@ export default function App() {
     return grouped;
   }, [state.tasks]);
 
-  const weekdays = useMemo(() => Array.from({ length: state.settings.maxColumns }, (_, index) => WEEKDAYS[(state.settings.weekStartsOn + index) % 7]), [state.settings.maxColumns, state.settings.weekStartsOn]);
-  const rowCount = Math.ceil(calendarDays.length / state.settings.maxColumns);
+  const columnCount = getCalendarColumns(state.settings.layout, state.settings.maxColumns);
+  const weekdays = useMemo(() => Array.from({ length: columnCount }, (_, index) => WEEKDAYS[(state.settings.weekStartsOn + index) % 7]), [columnCount, state.settings.weekStartsOn]);
+  const rowCount = Math.ceil(calendarDays.length / columnCount);
   const defaultTaskColor = readableTextColor(state.settings.backgroundColor, state.settings.taskTextColor, state.settings.taskAdaptiveColor);
 
   function matchesFilter(task: Task) {
@@ -294,7 +322,7 @@ export default function App() {
     '--title-button-color': state.settings.titleButtonColor,
     '--festival-color': state.settings.festivalTextColor,
     '--solar-term-color': state.settings.solarTermTextColor,
-    '--calendar-columns': state.settings.maxColumns,
+    '--calendar-columns': columnCount,
     '--calendar-rows': rowCount,
     '--topbar-height': state.settings.showTitleBar ? '32px' : '0px',
   } as CSSProperties;
@@ -345,9 +373,9 @@ export default function App() {
               const fontSize = taskFontSize(dayTasks.length, state.settings.taskBaseFontSize, state.settings.taskMinFontSize, state.settings.taskScrollThreshold);
               return (
                 <Fragment key={date}>
-                  {state.settings.showWeekNumbers && index % state.settings.maxColumns === 0 && <div className={`week-number-cell ${index >= calendarDays.length - state.settings.maxColumns ? 'is-last-row' : ''}`}>{getWeekNumber(date, state.settings.weekNumberMode)}</div>}
+                  {state.settings.showWeekNumbers && index % columnCount === 0 && <div className={`week-number-cell ${index >= calendarDays.length - columnCount ? 'is-last-row' : ''}`}>{getWeekNumber(date, state.settings.weekNumberMode)}</div>}
                   <div
-                    className={`day-cell ${isCurrentMonth ? '' : 'is-other-month'} ${date === today ? 'is-today' : ''} ${date === selectedDate ? 'is-selected' : ''} ${isRestDay ? 'is-weekend' : ''} ${index % state.settings.maxColumns === state.settings.maxColumns - 1 ? 'is-last-column' : ''} ${index >= calendarDays.length - state.settings.maxColumns ? 'is-last-row' : ''}`}
+                    className={`day-cell ${isCurrentMonth ? '' : 'is-other-month'} ${date === today ? 'is-today' : ''} ${date === selectedDate ? 'is-selected' : ''} ${isRestDay ? 'is-weekend' : ''} ${index % columnCount === columnCount - 1 ? 'is-last-column' : ''} ${index >= calendarDays.length - columnCount ? 'is-last-row' : ''}`}
                     role="gridcell"
                     aria-selected={date === selectedDate}
                     aria-label={`${fullDateLabel(date)}，${dayTasks.length} 项日程`}
@@ -385,10 +413,10 @@ export default function App() {
         {state.settings.showNotes && <NotesPanel notes={state.notes} settings={state.settings} onChange={(notes) => setState((current) => ({ ...current, notes }))} onClose={() => setState((current) => ({ ...current, settings: { ...current.settings, showNotes: false } }))} />}
 
         {isAdjusting && <>
-          <div className="adjustment-move-surface" aria-label="拖动移动日历" onPointerDown={(event) => startWindowAdjustment(event, 'move')} onPointerMove={updateWindowAdjustment} onPointerUp={stopWindowAdjustment} onPointerCancel={stopWindowAdjustment}><span>拖动移动日历</span></div>
+          <div className="adjustment-guard" aria-hidden="true" />
+          {!state.settings.showTitleBar && <div className="adjustment-move-edge" aria-label="拖动移动日历" onPointerDown={(event) => startWindowAdjustment(event, 'move')} onPointerMove={updateWindowAdjustment} onPointerUp={stopWindowAdjustment} onPointerCancel={stopWindowAdjustment} />}
           {WINDOW_RESIZE_EDGES.map((edge) => <div key={edge} className={`adjustment-border adjustment-border-${edge}`} aria-hidden="true" onPointerDown={(event) => startWindowAdjustment(event, 'resize', edge)} onPointerMove={updateWindowAdjustment} onPointerUp={stopWindowAdjustment} onPointerCancel={stopWindowAdjustment} />)}
-          <div className="adjustment-resize-handle" aria-label="拖动调整日历大小" onPointerDown={(event) => startWindowAdjustment(event, 'resize')} onPointerMove={updateWindowAdjustment} onPointerUp={stopWindowAdjustment} onPointerCancel={stopWindowAdjustment} />
-          <div className="adjustment-status">调整完成后，从右上角菜单退出调整模式</div>
+          <div className="adjustment-status">{state.settings.showTitleBar ? '拖动标题栏移动' : '拖动顶部移动'} · 拖动最外侧边缘调整大小 · 从右上角菜单退出</div>
         </>}
 
         {!isReady && <div className="loading-cover"><span /><p>正在整理你的日历…</p></div>}

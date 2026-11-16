@@ -7,7 +7,7 @@ select { font: inherit; }
 .calendar-shell.with-shadow { box-shadow: 0 8px 28px rgba(0, 0, 0, 0.28); }
 .window-controls button { color: var(--title-button-color); }
 .window-menu-backdrop { inset: var(--topbar-height) 0 0; }
-.adjustment-move-surface { inset: var(--topbar-height) 0 0; }
+.adjustment-guard { inset: var(--topbar-height) 0 0; }
 .calendar-shell.no-titlebar .adjustment-status { bottom: 10px; }
 .calendar-shell.content-hidden { min-height: 0; }
 
@@ -82,8 +82,8 @@ select { font: inherit; }
 .calendar-task.is-completed { opacity: 0.52; }
 
 .day-editor { font-family: var(--editor-font-family), sans-serif; }
-.editor-row input { color: var(--editor-text-color); font-family: inherit; font-size: var(--editor-font-size); }
-.editor-row.is-completed input { color: var(--editor-text-color); opacity: 0.45; }
+.editor-textarea { color: var(--editor-text-color); font-family: inherit; font-size: var(--editor-font-size); }
+.editor-row-input { color: var(--editor-text-color); font-family: inherit; font-size: var(--editor-font-size); }
 
 .notes-panel {
   position: absolute;

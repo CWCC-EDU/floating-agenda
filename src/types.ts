@@ -6,6 +6,8 @@ export type WeekNumberMode = 'iso' | 'jan1';
 export type TextBackground = 'none' | 'soft' | 'solid';
 export type SoundEffect = 'none' | 'tick' | 'chime';
 export type FontFamily = 'Microsoft YaHei' | 'Segoe UI' | 'PingFang SC' | 'SimSun';
+export type EditorInputStyle = 'one-box' | 'multi-row';
+export type DesktopIconLayer = 'auto' | 'above' | 'below';
 
 export interface Task {
   id: string;
@@ -78,6 +80,8 @@ export interface Settings {
   editorFontFamily: FontFamily;
   editorFontSize: number;
   editorTextColor: string;
+  editorInputStyle: EditorInputStyle;
+  desktopIconLayer: DesktopIconLayer;
   restDayBackgroundColor: string;
   titleButtonColor: string;
   festivalTextColor: string;
@@ -141,6 +145,8 @@ export interface DesktopBridge {
   loadState: () => Promise<unknown>;
   saveState: (state: AppState) => Promise<void>;
   minimizeWindow: () => Promise<void>;
+  focusWindow: () => Promise<boolean>;
+  setInteractionActive: (active: boolean) => Promise<void>;
   setWindowAdjustmentMode: (enabled: boolean) => Promise<void>;
   startWindowAdjustment: (mode: WindowAdjustmentMode, resizeEdges?: WindowResizeEdge) => Promise<void>;
   updateWindowAdjustment: () => Promise<void>;

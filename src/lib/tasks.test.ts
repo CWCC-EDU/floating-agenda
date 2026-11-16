@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { addDays, addMonths, daysBetween, festivalLabel, getCalendarDays, getWeekDays, getWeekNumber, lunarDateLabel, nextRepeatDate, solarTermLabel, toDateKey, yiJiLabel } from './date';
+import { addDays, addMonths, daysBetween, festivalLabel, getCalendarColumns, getCalendarDays, getWeekDays, getWeekNumber, lunarDateLabel, nextRepeatDate, solarTermLabel, toDateKey, yiJiLabel } from './date';
 import { appendNextRecurringTask, rolloverTasks, sortTasks } from './tasks';
 import type { Task } from '../types';
 
@@ -104,6 +104,22 @@ describe('date utilities', () => {
     expect(days[0]).toBe('2026-11-02');
     expect(days[4]).toBe('2026-11-06');
     expect(days[5]).toBe('2026-11-09');
+  });
+
+  it('keeps the whole month visible in full-month layout', () => {
+    expect(getCalendarColumns('full-month', 3)).toBe(7);
+    expect(getCalendarColumns('floating-month', 5)).toBe(5);
+    const days = getCalendarDays('2026-11-01', { layout: 'full-month', maxRows: 3, maxColumns: 5 });
+    expect(days).toHaveLength(42);
+    expect(days[0]).toBe('2026-10-26');
+    expect(days.filter((day) => day.startsWith('2026-11'))).toHaveLength(30);
+  });
+
+  it('uses the minimum week count for months that fit fewer rows', () => {
+    const days = getCalendarDays('2027-02-01', { layout: 'full-month', maxRows: 1, maxColumns: 2 });
+    expect(days).toHaveLength(28);
+    expect(days[0]).toBe('2027-02-01');
+    expect(days[27]).toBe('2027-02-28');
   });
 
   it('builds a floating single week and a custom week start', () => {

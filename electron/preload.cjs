@@ -5,6 +5,8 @@ contextBridge.exposeInMainWorld('desktop', {
   loadState: () => ipcRenderer.invoke('state:load'),
   saveState: (state) => ipcRenderer.invoke('state:save', state),
   minimizeWindow: () => ipcRenderer.invoke('window:minimize'),
+  focusWindow: () => ipcRenderer.invoke('window:focus'),
+  setInteractionActive: (active) => ipcRenderer.invoke('desktop:interactive', active),
   setWindowAdjustmentMode: (enabled) => ipcRenderer.invoke('window:adjust-mode', enabled),
   startWindowAdjustment: (mode, resizeEdges) => ipcRenderer.invoke('window:adjust-start', mode, resizeEdges),
   updateWindowAdjustment: () => ipcRenderer.invoke('window:adjust-update'),

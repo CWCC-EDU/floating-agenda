@@ -51,6 +51,8 @@ export const DEFAULT_SETTINGS: Settings = {
   editorFontFamily: 'Microsoft YaHei',
   editorFontSize: 12,
   editorTextColor: '#eef6f4',
+  editorInputStyle: 'one-box',
+  desktopIconLayer: 'auto',
   restDayBackgroundColor: '#23382f',
   titleButtonColor: '#d7e9a7',
   festivalTextColor: '#e3b760',
@@ -179,6 +181,8 @@ export function normalizeAppState(value: unknown): AppState {
   settings.calendarFontFamily = enumValue(raw.calendarFontFamily, ['Microsoft YaHei', 'Segoe UI', 'PingFang SC', 'SimSun'] as const, settings.calendarFontFamily);
   settings.editorFontFamily = enumValue(raw.editorFontFamily, ['Microsoft YaHei', 'Segoe UI', 'PingFang SC', 'SimSun'] as const, settings.editorFontFamily);
   settings.noteFontFamily = enumValue(raw.noteFontFamily, ['Microsoft YaHei', 'Segoe UI', 'PingFang SC', 'SimSun'] as const, settings.noteFontFamily);
+  settings.editorInputStyle = enumValue(raw.editorInputStyle, ['one-box', 'multi-row'] as const, settings.editorInputStyle);
+  settings.desktopIconLayer = enumValue(raw.desktopIconLayer, ['auto', 'above', 'below'] as const, settings.desktopIconLayer);
   settings.festivalRegion = 'CN';
   settings.language = 'zh-CN';
 

@@ -49,10 +49,14 @@ export function startOfWeek(key: string, weekStartsOn = 1): string {
   return addDays(key, -((day - weekStartsOn + 7) % 7));
 }
 
+export function getCalendarColumns(layout: CalendarLayout = 'full-month', maxColumns = 7): number {
+  return layout === 'full-month' ? 7 : Math.min(7, Math.max(1, maxColumns));
+}
+
 export function getCalendarDays(month: string, options: CalendarDayOptions = {}): string[] {
   const layout = options.layout ?? 'full-month';
   const maxRows = Math.min(6, Math.max(1, options.maxRows ?? 6));
-  const maxColumns = Math.min(7, Math.max(1, options.maxColumns ?? 7));
+  const columns = getCalendarColumns(layout, options.maxColumns);
   const weekStartsOn = options.weekStartsOn ?? 1;
   const monthStart = startOfMonth(month);
   let first = startOfWeek(monthStart, weekStartsOn);
@@ -66,10 +70,17 @@ export function getCalendarDays(month: string, options: CalendarDayOptions = {})
     }
   }
 
-  const rowCount = layout === 'fixed-week' || layout === 'floating-week' ? 1 : maxRows;
-  return Array.from({ length: rowCount * maxColumns }, (_, index) => {
-    const weekIndex = Math.floor(index / maxColumns);
-    const columnIndex = index % maxColumns;
+  let rowCount = maxRows;
+  if (layout === 'fixed-week' || layout === 'floating-week') {
+    rowCount = 1;
+  } else if (layout === 'full-month') {
+    const daysInMonth = daysBetween(monthStart, startOfMonth(addMonths(monthStart, 1)));
+    const weeksNeeded = Math.ceil((daysBetween(first, monthStart) + daysInMonth) / 7);
+    rowCount = Math.max(rowCount, weeksNeeded);
+  }
+  return Array.from({ length: rowCount * columns }, (_, index) => {
+    const weekIndex = Math.floor(index / columns);
+    const columnIndex = index % columns;
     return addDays(first, weekIndex * 7 + columnIndex);
   });
 }

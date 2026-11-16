@@ -36,4 +36,13 @@ describe('state normalization', () => {
     expect(state.settings.backgroundColor).toBe(DEFAULT_SETTINGS.backgroundColor);
     expect(state.settings.taskMinFontSize).toBe(8);
   });
+
+  it('normalizes editor input style and desktop icon layer', () => {
+    const state = normalizeAppState({ settings: { editorInputStyle: 'multi-row', desktopIconLayer: 'above' } });
+    expect(state.settings.editorInputStyle).toBe('multi-row');
+    expect(state.settings.desktopIconLayer).toBe('above');
+    const fallback = normalizeAppState({ settings: { editorInputStyle: 'grid', desktopIconLayer: 'top' } });
+    expect(fallback.settings.editorInputStyle).toBe('one-box');
+    expect(fallback.settings.desktopIconLayer).toBe('auto');
+  });
 });
