@@ -1,5 +1,5 @@
 import { Fragment, useEffect, useMemo, useRef, useState, type CSSProperties, type MouseEvent, type PointerEvent } from 'react';
-import { CalendarDays, Check, ChevronDown, ListChecks, LogOut, Menu, Move, Palette, Plus, Repeat2, Settings2, StickyNote } from 'lucide-react';
+import { CalendarDays, Check, ChevronDown, ChevronLeft, ChevronRight, ListChecks, LogOut, Menu, Move, Palette, Plus, Repeat2, Settings2, StickyNote } from 'lucide-react';
 import { DayEditorDialog } from './components/DayEditorDialog';
 import { NotesPanel } from './components/NotesPanel';
 import { SettingsDialog } from './components/SettingsDialog';
@@ -303,7 +303,11 @@ export default function App() {
     <main className={`desktop-canvas ${isElectron ? 'is-electron' : 'is-web'}`}>
       <section className={`calendar-shell ${isAdjusting ? 'is-adjusting' : ''} ${state.settings.blurEnabled ? '' : 'no-blur'} ${state.settings.showShadow ? 'with-shadow' : ''} ${showContent ? '' : 'content-hidden'} ${state.settings.showTitleBar ? '' : 'no-titlebar'}`} style={appStyle} aria-label="浮屿桌面月历">
         {state.settings.showTitleBar && <header className="calendar-topbar" onPointerDown={(event) => startWindowAdjustment(event, 'move')} onPointerMove={updateWindowAdjustment} onPointerUp={stopWindowAdjustment} onPointerCancel={stopWindowAdjustment}>
-          <div className="topbar-date">{TOP_DATE_FORMATTER.format(fromDateKey(today))}</div>
+          <div className="topbar-month-nav">
+            <button type="button" className="topbar-arrow" aria-label="上个月" title="上个月" onClick={() => setMonthCursor((current) => addMonths(current, -1))}><ChevronLeft size={13} /></button>
+            <div className="topbar-date">{TOP_DATE_FORMATTER.format(fromDateKey(today))}</div>
+            <button type="button" className="topbar-arrow" aria-label="下个月" title="下个月" onClick={() => setMonthCursor((current) => addMonths(current, 1))}><ChevronRight size={13} /></button>
+          </div>
           <div className="window-controls">
             <button type="button" aria-label="打开功能菜单" title="功能菜单" aria-expanded={showWindowMenu} onClick={() => setShowWindowMenu((current) => !current)}><Menu size={17} /></button>
           </div>
