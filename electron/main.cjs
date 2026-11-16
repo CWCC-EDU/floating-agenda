@@ -1,11 +1,14 @@
 const { app, BrowserWindow, globalShortcut, ipcMain, Menu, nativeImage, net, Notification, screen, session, Tray } = require('electron');
 const { spawn } = require('node:child_process');
 const fs = require('node:fs/promises');
+const fsSync = require('node:fs');
 const path = require('node:path');
 
 let mainWindow = null;
 let tray = null;
 let currentFilter = 'all';
+let isQuitting = false;
+let desktopAttached = false;
 let latestSettings = {
   autoNumber: true,
   showWeekNumbers: true,
@@ -24,7 +27,31 @@ let adjustment = null;
 let integrationSignature = '';
 
 const statePath = () => path.join(app.getPath('userData'), 'floating-agenda.json');
+const windowBoundsPath = () => path.join(app.getPath('userData'), 'window-bounds.json');
 const iconPath = () => path.join(__dirname, '..', 'build', 'icon.png');
+
+function loadWindowBounds(workArea) {
+  try {
+    const saved = JSON.parse(fsSync.readFileSync(windowBoundsPath(), 'utf8'));
+    const width = Math.round(Number(saved.width));
+    const height = Math.round(Number(saved.height));
+    const x = Math.round(Number(saved.x));
+    const y = Math.round(Number(saved.y));
+    if (![width, height, x, y].every(Number.isFinite) || width < 760 || height < 520) return null;
+    const margin = 60;
+    const clampedX = Math.min(Math.max(x, workArea.x + margin - width + 120), workArea.x + workArea.width - 120);
+    const clampedY = Math.min(Math.max(y, workArea.y), workArea.y + workArea.height - margin);
+    return { x: clampedX, y: clampedY, width, height };
+  } catch {
+    return null;
+  }
+}
+
+function saveWindowBounds() {
+  if (!mainWindow || mainWindow.isDestroyed()) return;
+  const { x, y, width, height } = mainWindow.getBounds();
+  fs.writeFile(windowBoundsPath(), JSON.stringify({ x, y, width, height }), 'utf8').catch(() => {});
+}
 
 function putWindowAtDesktopBottom() {
   if (process.platform !== 'win32' || !mainWindow || mainWindow.isDestroyed()) return;
@@ -50,11 +77,85 @@ function putWindowAtDesktopBottom() {
   });
 }
 
+function attachToDesktop() {
+  if (process.platform !== 'win32' || !mainWindow || mainWindow.isDestroyed()) return;
+  const handle = mainWindow.getNativeWindowHandle().readBigUInt64LE(0).toString();
+  const command = `
+    Add-Type -TypeDefinition 'using System; using System.Runtime.InteropServices; using System.Text; public static class DesktopHost {
+      [DllImport("user32.dll", SetLastError = true, CharSet = CharSet.Unicode)]
+      public static extern IntPtr FindWindow(string lpClassName, string lpWindowName);
+      [DllImport("user32.dll", SetLastError = true)]
+      public static extern IntPtr SetParent(IntPtr hWndChild, IntPtr hWndNewParent);
+      [DllImport("user32.dll", SetLastError = true)]
+      public static extern bool SetWindowPos(IntPtr hWnd, IntPtr hWndInsertAfter, int X, int Y, int cx, int cy, uint uFlags);
+      [DllImport("user32.dll", SetLastError = true)]
+      public static extern IntPtr GetParent(IntPtr hWnd);
+      [DllImport("user32.dll", SetLastError = true)]
+      public static extern bool EnumWindows(EnumWindowsProc lpEnumFunc, IntPtr lParam);
+      [DllImport("user32.dll", SetLastError = true)]
+      public static extern bool EnumChildWindows(IntPtr hWndParent, EnumWindowsProc lpEnumFunc, IntPtr lParam);
+      [DllImport("user32.dll", SetLastError = true, CharSet = CharSet.Unicode)]
+      public static extern int GetClassName(IntPtr hWnd, StringBuilder lpClassName, int nMaxCount);
+      [DllImport("user32.dll", SetLastError = true)]
+      public static extern bool IsWindowVisible(IntPtr hWnd);
+      public delegate bool EnumWindowsProc(IntPtr hWnd, IntPtr lParam);
+    }';
+    $found = [System.Collections.Generic.List[object]]::new();
+    $defViewClass = 'SHELLDLL_DefView';
+    $cal = [IntPtr]::new([int64]'${handle}');
+    $progman = [DesktopHost]::FindWindow('Progman', [NullString]::Value);
+    if ($progman -ne [IntPtr]::Zero) {
+      $probe = { param($w, $l) $buf = [Text.StringBuilder]::new(256); [DesktopHost]::GetClassName($w, $buf, 256) | Out-Null; if ($buf.ToString() -eq $defViewClass) { $found.Add($w) }; return $true }.GetNewClosure();
+      [DesktopHost]::EnumChildWindows($progman, $probe, [IntPtr]::Zero) | Out-Null;
+    }
+    if ($found.Count -eq 0) {
+      $workerProbe = { param($w, $l) $buf = [Text.StringBuilder]::new(256); [DesktopHost]::GetClassName($w, $buf, 256) | Out-Null; if ($buf.ToString() -eq 'WorkerW') { $found.Add($w) }; return $true }.GetNewClosure();
+      [DesktopHost]::EnumWindows($workerProbe, [IntPtr]::Zero) | Out-Null;
+      $defFound = $false;
+      foreach ($w in $found) {
+        $probe2 = { param($ww, $ll) $buf = [Text.StringBuilder]::new(256); [DesktopHost]::GetClassName($ww, $buf, 256) | Out-Null; if ($buf.ToString() -eq $defViewClass) { $found.Add($ww) }; return $true }.GetNewClosure();
+        [DesktopHost]::EnumChildWindows($w, $probe2, [IntPtr]::Zero) | Out-Null;
+        if ($found.Count -gt 0) { $defFound = $true; break }
+      }
+      if (-not $defFound) { $found.Clear() }
+    }
+    $def = [IntPtr]::Zero;
+    if ($found.Count -gt 0) { $def = [IntPtr]$found[$found.Count - 1] }
+    if ($def -eq [IntPtr]::Zero) { Write-Output 'NO_DEFVIEW'; exit 0 }
+    $hostWnd = [DesktopHost]::GetParent($def);
+    if ($hostWnd -eq [IntPtr]::Zero) { $hostWnd = $progman }
+    if ([DesktopHost]::GetParent($cal) -ne $hostWnd) {
+      [DesktopHost]::SetParent($cal, $hostWnd) | Out-Null;
+    }
+    [DesktopHost]::SetWindowPos($cal, $def, 0, 0, 0, 0, 0x0013) | Out-Null;
+    Write-Output 'ATTACHED'
+  `;
+  const child = spawn('powershell.exe', [
+    '-NoProfile',
+    '-NonInteractive',
+    '-Command',
+    command,
+  ], { windowsHide: true });
+  let stdout = '';
+  let stderr = '';
+  child.stdout.on('data', (data) => { stdout += data.toString(); });
+  child.stderr.on('data', (data) => { stderr += data.toString(); });
+  child.on('error', (error) => console.error('Unable to attach calendar to desktop:', error));
+  child.on('close', (code) => {
+    if (code === 0 && stdout.includes('ATTACHED')) {
+      desktopAttached = true;
+    } else {
+      if (code !== 0) console.error('Desktop attachment failed:', stderr || `exit ${code}`);
+      if (!desktopAttached) putWindowAtDesktopBottom();
+    }
+  });
+}
+
 function showWindow() {
   if (!mainWindow) return;
   if (mainWindow.isMinimized()) mainWindow.restore();
   if (!mainWindow.isVisible()) mainWindow.showInactive();
-  putWindowAtDesktopBottom();
+  attachToDesktop();
 }
 
 function minimizeWindow() {
@@ -184,7 +285,7 @@ function updateTrayMenu() {
     { label: '跟随 Windows 启动', type: 'checkbox', checked: latestSettings.autoStartEnabled, click: () => sendMenuAction('toggle:autoStartEnabled') },
     { label: '背景、透明度与更多设置…', click: () => sendMenuAction('open-settings') },
     { type: 'separator' },
-    { label: '退出浮屿', click: () => app.quit() },
+    { label: '退出浮屿', click: quitApp },
   ]);
   tray.setContextMenu(menu);
 }
@@ -199,16 +300,17 @@ function createTray() {
 
 function createWindow() {
   const workArea = screen.getPrimaryDisplay().workArea;
-  const width = Math.min(1180, workArea.width - 64);
-  const height = Math.min(760, workArea.height - 64);
+  const savedBounds = loadWindowBounds(workArea);
+  const width = savedBounds ? savedBounds.width : Math.min(1180, workArea.width - 64);
+  const height = savedBounds ? savedBounds.height : Math.min(760, workArea.height - 64);
 
   mainWindow = new BrowserWindow({
     width,
     height,
     minWidth: 760,
     minHeight: 520,
-    x: workArea.x + Math.floor((workArea.width - width) / 2),
-    y: workArea.y + Math.floor((workArea.height - height) / 2),
+    x: savedBounds ? savedBounds.x : workArea.x + Math.floor((workArea.width - width) / 2),
+    y: savedBounds ? savedBounds.y : workArea.y + Math.floor((workArea.height - height) / 2),
     transparent: true,
     frame: false,
     icon: iconPath(),
@@ -234,13 +336,31 @@ function createWindow() {
     mainWindow.loadFile(path.join(__dirname, '..', 'dist', 'index.html'));
   }
 
-  mainWindow.once('ready-to-show', putWindowAtDesktopBottom);
-  mainWindow.on('show', putWindowAtDesktopBottom);
-  mainWindow.on('restore', putWindowAtDesktopBottom);
+  mainWindow.once('ready-to-show', attachToDesktop);
+  mainWindow.on('show', attachToDesktop);
+  mainWindow.on('restore', attachToDesktop);
+  mainWindow.on('close', saveWindowBounds);
+  mainWindow.webContents.on('render-process-gone', () => {
+    if (!isQuitting && mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.reload();
+  });
+  mainWindow.webContents.on('did-fail-load', (_event, code) => {
+    if (!isQuitting && code !== -3) {
+      setTimeout(() => {
+        if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.reload();
+      }, 1000);
+    }
+  });
   mainWindow.on('closed', () => {
     adjustment = null;
     mainWindow = null;
+    desktopAttached = false;
+    if (!isQuitting) setTimeout(createWindow, 800);
   });
+}
+
+function quitApp() {
+  isQuitting = true;
+  app.quit();
 }
 
 async function restoreSavedSettings() {
@@ -263,6 +383,7 @@ if (!hasSingleInstanceLock) {
     createTray();
     await applyIntegrationSettings();
     if (latestSettings.autoCheckUpdates) void checkForUpdatesInBackground();
+    setInterval(attachToDesktop, 30_000);
     setInterval(() => {
       if (latestSettings.autoCheckUpdates) void checkForUpdatesInBackground();
     }, 12 * 60 * 60 * 1000);
@@ -274,7 +395,9 @@ if (!hasSingleInstanceLock) {
   });
 
   app.on('will-quit', () => globalShortcut.unregisterAll());
-  app.on('window-all-closed', () => app.quit());
+  app.on('window-all-closed', () => {
+    if (isQuitting) app.quit();
+  });
 }
 
 ipcMain.handle('state:load', async () => {
@@ -303,7 +426,7 @@ ipcMain.handle('window:adjust-mode', (_event, enabled) => {
   if (!mainWindow || mainWindow.isDestroyed()) return;
   adjustment = null;
   mainWindow.setResizable(enabled === true);
-  if (!enabled) putWindowAtDesktopBottom();
+  if (!enabled) attachToDesktop();
 });
 
 ipcMain.handle('window:adjust-start', (_event, mode, resizeEdges) => {
@@ -356,12 +479,10 @@ ipcMain.handle('window:adjust-update', () => {
 
 ipcMain.handle('window:adjust-stop', () => {
   adjustment = null;
-  putWindowAtDesktopBottom();
+  saveWindowBounds();
+  attachToDesktop();
 });
 
-ipcMain.handle('window:quit', () => {
-  adjustment = null;
-  app.quit();
-});
+ipcMain.handle('window:quit', quitApp);
 
 ipcMain.handle('update:check', checkForUpdates);
