@@ -15,7 +15,7 @@ let latestSettings = {
   rolloverEnabled: true,
   autoStartEnabled: false,
   autoCheckUpdates: false,
-  desktopIconLayer: 'auto',
+  desktopIconLayer: 'below',
   proxyEnabled: false,
   proxyServer: '',
   showHideShortcut: 'Control+Shift+Space',

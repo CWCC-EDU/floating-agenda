@@ -43,6 +43,6 @@ describe('state normalization', () => {
     expect(state.settings.desktopIconLayer).toBe('above');
     const fallback = normalizeAppState({ settings: { editorInputStyle: 'grid', desktopIconLayer: 'top' } });
     expect(fallback.settings.editorInputStyle).toBe('one-box');
-    expect(fallback.settings.desktopIconLayer).toBe('auto');
+    expect(fallback.settings.desktopIconLayer).toBe('below');
   });
 });

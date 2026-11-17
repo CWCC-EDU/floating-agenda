@@ -52,7 +52,7 @@ export const DEFAULT_SETTINGS: Settings = {
   editorFontSize: 12,
   editorTextColor: '#eef6f4',
   editorInputStyle: 'one-box',
-  desktopIconLayer: 'auto',
+  desktopIconLayer: 'below',
   restDayBackgroundColor: '#23382f',
   titleButtonColor: '#d7e9a7',
   festivalTextColor: '#e3b760',
