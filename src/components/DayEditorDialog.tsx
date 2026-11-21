@@ -124,11 +124,14 @@ interface DayEditorDialogProps {
   tasks: Task[];
   initialTaskId?: string;
   settings: Settings;
+  onAutoSave: (tasks: Task[]) => void;
   onSave: (tasks: Task[]) => void;
   onClose: () => void;
 }
 
-export function DayEditorDialog({ date, tasks, initialTaskId, settings, onSave, onClose }: DayEditorDialogProps) {
+const AUTO_SAVE_DELAY = 400;
+
+export function DayEditorDialog({ date, tasks, initialTaskId, settings, onAutoSave, onSave, onClose }: DayEditorDialogProps) {
   const initialRows = [...sortTasks(tasks, settings.completedToBottom), createEmptyTask(date)];
   const multiRow = settings.editorInputStyle === 'multi-row';
   const [rows, setRows] = useState<Task[]>(initialRows);
@@ -141,6 +144,52 @@ export function DayEditorDialog({ date, tasks, initialTaskId, settings, onSave, 
   const rowInputRefs = useRef<(HTMLInputElement | null)[]>([]);
   const selectedIndex = Math.min(activeLine, rows.length - 1);
   const selected = rows[selectedIndex] ?? rows[0];
+  const rowsRef = useRef(rows);
+  const autoSaveRef = useRef(onAutoSave);
+  const dirtyRef = useRef(false);
+  const saveTimerRef = useRef<number | null>(null);
+  const mountedRef = useRef(false);
+
+  useEffect(() => { rowsRef.current = rows; }, [rows]);
+  useEffect(() => { autoSaveRef.current = onAutoSave; }, [onAutoSave]);
+
+  function collectTasks(): Task[] {
+    return rowsRef.current.filter((row) => row.title.trim()).map((row) => ({ ...row, title: row.title.trim() }));
+  }
+
+  function flushAutoSave() {
+    if (saveTimerRef.current !== null) {
+      window.clearTimeout(saveTimerRef.current);
+      saveTimerRef.current = null;
+    }
+    if (!dirtyRef.current) return;
+    dirtyRef.current = false;
+    autoSaveRef.current(collectTasks());
+  }
+
+  useEffect(() => {
+    if (!mountedRef.current) {
+      mountedRef.current = true;
+      return;
+    }
+    dirtyRef.current = true;
+    if (saveTimerRef.current !== null) window.clearTimeout(saveTimerRef.current);
+    saveTimerRef.current = window.setTimeout(() => {
+      saveTimerRef.current = null;
+      if (!dirtyRef.current) return;
+      dirtyRef.current = false;
+      autoSaveRef.current(collectTasks());
+    }, AUTO_SAVE_DELAY);
+    return () => {
+      if (saveTimerRef.current !== null) {
+        window.clearTimeout(saveTimerRef.current);
+        saveTimerRef.current = null;
+      }
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [rows, text]);
+
+  useEffect(() => () => flushAutoSave(), []);
 
   useEffect(() => {
     const taskIndex = initialTaskId ? rows.findIndex((row) => row.id === initialTaskId) : -1;
@@ -379,8 +428,12 @@ export function DayEditorDialog({ date, tasks, initialTaskId, settings, onSave, 
   }
 
   function save() {
-    const editedTasks = rows.filter((row) => row.title.trim()).map((row) => ({ ...row, title: row.title.trim() }));
-    onSave(sortTasks(editedTasks, settings.completedToBottom));
+    if (saveTimerRef.current !== null) {
+      window.clearTimeout(saveTimerRef.current);
+      saveTimerRef.current = null;
+    }
+    dirtyRef.current = false;
+    onSave(sortTasks(collectTasks(), settings.completedToBottom));
   }
 
   const editorStyle = {
@@ -398,7 +451,7 @@ export function DayEditorDialog({ date, tasks, initialTaskId, settings, onSave, 
             <h2 id="day-editor-title">{fullDateLabel(date)}</h2>
           </div>
           <button className="icon-button" type="button" onClick={onClose} aria-label="关闭编辑器"><X size={17} /></button>
-          <button className="editor-save" type="button" onClick={save} aria-label="保存当天日程" title="保存"><Check size={19} /></button>
+          <button className="editor-save" type="button" onClick={save} aria-label="保存并关闭" title="保存并关闭"><Check size={19} /></button>
         </header>
 
         <div className={`editor-textbox ${multiRow ? 'is-multi-row' : ''}`}>
@@ -525,7 +578,7 @@ export function DayEditorDialog({ date, tasks, initialTaskId, settings, onSave, 
 
           <button type="button" onClick={insertLine}><Plus size={15} /><span>新行</span></button>
           <button type="button" className="editor-delete" onClick={removeSelectedLine}><Trash2 size={15} /><span>删除</span></button>
-          <span className="editor-hint">{multiRow ? 'Enter 新增一行' : 'Enter 换行'}</span>
+          <span className="editor-hint">{multiRow ? 'Enter 新增一行' : 'Enter 换行'} · 自动保存</span>
         </footer>
       </section>
     </div>

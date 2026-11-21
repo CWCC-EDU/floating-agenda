@@ -4,7 +4,7 @@ import { DayEditorDialog } from './components/DayEditorDialog';
 import { NotesPanel } from './components/NotesPanel';
 import { SettingsDialog } from './components/SettingsDialog';
 import { addMonths, festivalLabel, fromDateKey, fullDateLabel, getCalendarColumns, getCalendarDays, getWeekNumber, lunarDateLabel, monthLabel, shortDateLabel, solarTermLabel, startOfMonth, toDateKey, yiJiLabel } from './lib/date';
-import { appendNextRecurringTask, rolloverTasks, sortTasks } from './lib/tasks';
+import { extendRecurringTasks, rolloverTasks, sortTasks } from './lib/tasks';
 import { DEFAULT_SETTINGS, loadAppState, saveAppState } from './lib/storage';
 import { readableTextColor, taskFontSize } from './lib/appearance';
 import { playSound } from './lib/sound';
@@ -64,8 +64,10 @@ export default function App() {
     let active = true;
     loadAppState().then((saved) => {
       if (!active) return;
-      const result = rolloverTasks(saved.tasks, toDateKey(), saved.settings);
-      setState({ ...saved, tasks: result.tasks });
+      const todayKey = toDateKey();
+      const result = rolloverTasks(saved.tasks, todayKey, saved.settings);
+      const extended = extendRecurringTasks(result.tasks, todayKey);
+      setState({ ...saved, tasks: extended.tasks });
       setIsReady(true);
       if (result.moved > 0) setToast(`已把 ${result.moved} 项未完成任务顺延到今天`);
     }).catch(() => {
@@ -97,8 +99,9 @@ export default function App() {
       notifiedTasks.current.clear();
       setState((current) => {
         const result = rolloverTasks(current.tasks, nextToday, current.settings);
+        const extended = extendRecurringTasks(result.tasks, nextToday);
         if (result.moved > 0) setToast(`新的一天，已顺延 ${result.moved} 项未完成任务`);
-        return { ...current, tasks: result.tasks };
+        return { ...current, tasks: extended.tasks };
       });
     };
     const timer = window.setInterval(checkDate, 30_000);
@@ -206,20 +209,19 @@ export default function App() {
     setMonthCursor(startOfMonth(today));
   }
 
-  function saveDayTasks(date: string, editedTasks: Task[]) {
+  function saveDayTasks(date: string, editedTasks: Task[], close = true) {
     setState((current) => {
-      const previousTasks = current.tasks.filter((task) => task.date === date);
-      const previousById = new Map(previousTasks.map((task) => [task.id, task]));
-      const sortedTasks = sortTasks(editedTasks, current.settings.completedToBottom);
-      let tasks = [...current.tasks.filter((task) => task.date !== date), ...sortedTasks];
-      editedTasks.forEach((task) => {
-        const previous = previousById.get(task.id);
-        if (task.completed && (!previous || !previous.completed)) tasks = appendNextRecurringTask(tasks, task);
-      });
-      return { ...current, tasks };
+      const linkedTasks = editedTasks.map((task) => (
+        task.repeat !== 'none' && !task.seriesId ? { ...task, seriesId: task.id } : task
+      ));
+      const sortedTasks = sortTasks(linkedTasks, current.settings.completedToBottom);
+      const merged = [...current.tasks.filter((task) => task.date !== date), ...sortedTasks];
+      const extended = extendRecurringTasks(merged, today);
+      return { ...current, tasks: extended.tasks };
     });
     setSelectedDate(date);
     setMonthCursor(startOfMonth(date));
+    if (!close) return;
     setEditor(null);
     playSound(state.settings.editSaveSound);
     setToast('当天日程已保存');
@@ -228,9 +230,7 @@ export default function App() {
   function toggleTaskCompletion(task: Task) {
     setState((current) => {
       const updated = { ...task, completed: !task.completed, completedAt: task.completed ? undefined : new Date().toISOString() };
-      let tasks = current.tasks.map((item) => item.id === task.id ? updated : item);
-      if (updated.completed) tasks = appendNextRecurringTask(tasks, updated);
-      return { ...current, tasks };
+      return { ...current, tasks: current.tasks.map((item) => item.id === task.id ? updated : item) };
     });
     playSound(state.settings.editSaveSound);
   }
@@ -420,7 +420,7 @@ export default function App() {
         </>}
 
         {!isReady && <div className="loading-cover"><span /><p>正在整理你的日历…</p></div>}
-        {editor && <DayEditorDialog date={editor.date} tasks={tasksByDate.get(editor.date) ?? []} initialTaskId={editor.taskId} settings={state.settings} onSave={(tasks) => saveDayTasks(editor.date, tasks)} onClose={() => setEditor(null)} />}
+        {editor && <DayEditorDialog date={editor.date} tasks={tasksByDate.get(editor.date) ?? []} initialTaskId={editor.taskId} settings={state.settings} onAutoSave={(tasks) => saveDayTasks(editor.date, tasks, false)} onSave={(tasks) => saveDayTasks(editor.date, tasks)} onClose={() => setEditor(null)} />}
         {showSettings && <SettingsDialog settings={state.settings} isElectron={isElectron} onChange={updateSettings} onClose={() => setShowSettings(false)} onOpenNotes={() => { setShowSettings(false); setState((current) => ({ ...current, settings: { ...current.settings, showNotes: true } })); }} />}
         {toast && <div className="toast" role="status"><ListChecks size={16} />{toast}</div>}
       </section>

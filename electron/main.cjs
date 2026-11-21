@@ -80,59 +80,96 @@ function putWindowAtDesktopBottom() {
   });
 }
 
-function attachToDesktop() {
+let attachLogged = false;
+function logDesktop(message) {
+  try {
+    fs.appendFile(path.join(app.getPath('userData'), 'desktop.log'), `${new Date().toISOString()} ${message}\n`, 'utf8').catch(() => {});
+  } catch {
+    // logging is best-effort
+  }
+}
+
+function attachToDesktop(forceShow = false) {
   if (process.platform !== 'win32' || !mainWindow || mainWindow.isDestroyed()) return;
   const handle = mainWindow.getNativeWindowHandle().readBigUInt64LE(0).toString();
   const placeAboveIcons = desktopLayer.raised !== false;
+  const wantVisible = forceShow || mainWindow.isVisible();
   const command = `
     Add-Type -TypeDefinition 'using System; using System.Runtime.InteropServices; using System.Text; public static class DesktopHost {
       [DllImport("user32.dll", SetLastError = true, CharSet = CharSet.Unicode)]
       public static extern IntPtr FindWindow(string lpClassName, string lpWindowName);
+      [DllImport("user32.dll", SetLastError = true, CharSet = CharSet.Unicode)]
+      public static extern IntPtr FindWindowEx(IntPtr parent, IntPtr after, string cls, string win);
       [DllImport("user32.dll", SetLastError = true)]
       public static extern IntPtr SetParent(IntPtr hWndChild, IntPtr hWndNewParent);
       [DllImport("user32.dll", SetLastError = true)]
       public static extern bool SetWindowPos(IntPtr hWnd, IntPtr hWndInsertAfter, int X, int Y, int cx, int cy, uint uFlags);
       [DllImport("user32.dll", SetLastError = true)]
       public static extern IntPtr GetParent(IntPtr hWnd);
-      [DllImport("user32.dll", SetLastError = true)]
-      public static extern IntPtr GetWindow(IntPtr hWnd, uint uCmd);
       [DllImport("user32.dll", SetLastError = true, CharSet = CharSet.Unicode)]
       public static extern int GetClassName(IntPtr hWnd, StringBuilder lpClassName, int nMaxCount);
       [DllImport("user32.dll", SetLastError = true)]
       public static extern IntPtr GetWindowLongPtr(IntPtr hWnd, int nIndex);
       [DllImport("user32.dll", SetLastError = true)]
       public static extern IntPtr SetWindowLongPtr(IntPtr hWnd, int nIndex, IntPtr dwNewLong);
+      [DllImport("user32.dll")] public static extern bool ShowWindow(IntPtr hWnd, int nCmdShow);
+      [DllImport("user32.dll")] public static extern bool IsWindowVisible(IntPtr hWnd);
+      public delegate bool EnumWindowsProc(IntPtr hWnd, IntPtr lParam);
+      [DllImport("user32.dll")] public static extern bool EnumWindows(EnumWindowsProc lpEnumFunc, IntPtr lParam);
+      public static IntPtr FindDesktopDefView() {
+        IntPtr progman = FindWindow("Progman", null);
+        if (progman != IntPtr.Zero) {
+          IntPtr direct = FindWindowEx(progman, IntPtr.Zero, "SHELLDLL_DefView", null);
+          if (direct != IntPtr.Zero) return direct;
+        }
+        IntPtr found = IntPtr.Zero;
+        EnumWindows(delegate(IntPtr h, IntPtr l) {
+          IntPtr d = FindWindowEx(h, IntPtr.Zero, "SHELLDLL_DefView", null);
+          if (d != IntPtr.Zero) { found = d; return false; }
+          return true;
+        }, IntPtr.Zero);
+        return found;
+      }
     }';
     $cal = [IntPtr]::new([int64]'${handle}');
     $progman = [DesktopHost]::FindWindow('Progman', [NullString]::Value);
     if ($progman -eq [IntPtr]::Zero) { Write-Output 'NO_PROGMAN'; exit 0 }
-    $child = [DesktopHost]::GetWindow($progman, 5);
+    $defView = [DesktopHost]::FindDesktopDefView();
     $hostWnd = $progman;
-    $defView = [IntPtr]::Zero;
-    while ($child -ne [IntPtr]::Zero) {
-      $buf = [Text.StringBuilder]::new(256);
-      [DesktopHost]::GetClassName($child, $buf, 256) | Out-Null;
-      if ($buf.ToString() -eq 'SHELLDLL_DefView') {
-        $defView = $child;
-        $parentOfDefView = [DesktopHost]::GetParent($child);
-        if ($parentOfDefView -ne [IntPtr]::Zero) { $hostWnd = $parentOfDefView }
-        break
-      }
-      $child = [DesktopHost]::GetWindow($child, 2);
+    if ($defView -ne [IntPtr]::Zero) {
+      $defParent = [DesktopHost]::GetParent($defView);
+      if ($defParent -ne [IntPtr]::Zero) { $hostWnd = $defParent }
     }
-    $style = [DesktopHost]::GetWindowLongPtr($cal, -16).ToInt64();
-    $style = ($style -band (-bnot 0x80000000)) -bor 0x40000000;
-    [DesktopHost]::SetWindowLongPtr($cal, -16, [IntPtr]::new($style)) | Out-Null;
-    if ([DesktopHost]::GetParent($cal) -ne $hostWnd) {
+    $currentParent = [DesktopHost]::GetParent($cal);
+    $parentChanged = $currentParent -ne $hostWnd;
+    if ($parentChanged) {
+      if ($currentParent -ne [IntPtr]::Zero) { [DesktopHost]::SetParent($cal, [IntPtr]::Zero) | Out-Null }
       [DesktopHost]::SetParent($cal, $hostWnd) | Out-Null;
     }
-    $placeAbove = $${placeAboveIcons ? 'true' : 'false'};
-    if ($placeAbove -or $defView -eq [IntPtr]::Zero) {
-      [DesktopHost]::SetWindowPos($cal, [IntPtr]::new(0), 0, 0, 0, 0, 0x0013) | Out-Null;
-    } else {
-      [DesktopHost]::SetWindowPos($cal, $defView, 0, 0, 0, 0, 0x0013) | Out-Null;
+    $style = [DesktopHost]::GetWindowLongPtr($cal, -16).ToInt64();
+    $nextStyle = ($style -band (-bnot 0x80000000)) -bor 0x40000000;
+    $styleChanged = $nextStyle -ne $style;
+    if ($styleChanged) {
+      [DesktopHost]::SetWindowLongPtr($cal, -16, [IntPtr]::new($nextStyle)) | Out-Null;
     }
-    Write-Output 'ATTACHED'
+    $placeAbove = $${placeAboveIcons ? 'true' : 'false'};
+    $flags = 0x0013;
+    if ($parentChanged -or $styleChanged) { $flags = $flags -bor 0x0020 }
+    if ($placeAbove -or $defView -eq [IntPtr]::Zero) {
+      [DesktopHost]::SetWindowPos($cal, [IntPtr]::new(0), 0, 0, 0, 0, $flags) | Out-Null;
+    } else {
+      [DesktopHost]::SetWindowPos($cal, $defView, 0, 0, 0, 0, $flags) | Out-Null;
+    }
+    if ($${wantVisible ? 'true' : 'false'}) {
+      [DesktopHost]::ShowWindow($cal, 8) | Out-Null;
+    }
+    $parentBuf = [Text.StringBuilder]::new(256);
+    $hostBuf = [Text.StringBuilder]::new(256);
+    $nowParent = [DesktopHost]::GetParent($cal);
+    if ($nowParent -ne [IntPtr]::Zero) { [DesktopHost]::GetClassName($nowParent, $parentBuf, 256) | Out-Null }
+    [DesktopHost]::GetClassName($hostWnd, $hostBuf, 256) | Out-Null;
+    $visible = [DesktopHost]::IsWindowVisible($cal);
+    Write-Output ('ATTACHED:' + $visible + ':' + $parentBuf.ToString() + ':' + $hostBuf.ToString())
   `;
   const child = spawn('powershell.exe', [
     '-NoProfile',
@@ -146,7 +183,12 @@ function attachToDesktop() {
   child.stderr.on('data', (data) => { stderr += data.toString(); });
   child.on('error', (error) => console.error('Unable to attach calendar to desktop:', error));
   child.on('close', (code) => {
-    if (code !== 0 || !stdout.includes('ATTACHED')) {
+    const ok = code === 0 && stdout.includes('ATTACHED');
+    if (!attachLogged) {
+      attachLogged = true;
+      logDesktop(`${ok ? 'attach' : 'attach-failed'} mode=${latestSettings.desktopIconLayer} wantVisible=${wantVisible} code=${code} out=${stdout.trim()} err=${stderr.trim()}`);
+    }
+    if (!ok) {
       console.error('Desktop attachment failed:', stderr || stdout || `exit ${code}`);
       putWindowAtDesktopBottom();
     }
@@ -168,18 +210,26 @@ const FOCUS_HELPER_SCRIPT = `
     [DllImport("user32.dll")] public static extern IntPtr GetWindowLongPtr(IntPtr hWnd, int nIndex);
     [DllImport("user32.dll")] public static extern IntPtr SetWindowLongPtr(IntPtr hWnd, int nIndex, IntPtr dwNewLong);
     [DllImport("user32.dll")] public static extern bool RedrawWindow(IntPtr hWnd, IntPtr lprcUpdate, IntPtr hrgnUpdate, uint flags);
+    [DllImport("user32.dll")] public static extern bool ShowWindow(IntPtr hWnd, int nCmdShow);
+    public delegate bool EnumWindowsProc(IntPtr hWnd, IntPtr lParam);
+    [DllImport("user32.dll")] public static extern bool EnumWindows(EnumWindowsProc lpEnumFunc, IntPtr lParam);
+    public static IntPtr FindDesktopDefView() {
+      IntPtr progman = FindWindow("Progman", null);
+      if (progman != IntPtr.Zero) {
+        IntPtr direct = FindWindowEx(progman, IntPtr.Zero, "SHELLDLL_DefView", null);
+        if (direct != IntPtr.Zero) return direct;
+      }
+      IntPtr found = IntPtr.Zero;
+      EnumWindows(delegate(IntPtr h, IntPtr l) {
+        IntPtr d = FindWindowEx(h, IntPtr.Zero, "SHELLDLL_DefView", null);
+        if (d != IntPtr.Zero) { found = d; return false; }
+        return true;
+      }, IntPtr.Zero);
+      return found;
+    }
   }';
   function Get-DesktopDefView {
-    $progman = [FocusGrant]::FindWindow('Progman', [NullString]::Value);
-    if ($progman -eq [IntPtr]::Zero) { return [IntPtr]::Zero }
-    $child = [FocusGrant]::GetWindow($progman, 5);
-    while ($child -ne [IntPtr]::Zero) {
-      $buf = [Text.StringBuilder]::new(256);
-      [FocusGrant]::GetClassName($child, $buf, 256) | Out-Null;
-      if ($buf.ToString() -eq 'SHELLDLL_DefView') { return $child }
-      $child = [FocusGrant]::GetWindow($child, 2);
-    }
-    return [IntPtr]::Zero
+    return [FocusGrant]::FindDesktopDefView()
   }
   function Get-DesktopIconWindows {
     $defView = Get-DesktopDefView;
@@ -238,6 +288,10 @@ const FOCUS_HELPER_SCRIPT = `
       } elseif ($line.StartsWith('styles:')) {
         $parts = $line.Substring(7).Split(':');
         Set-DesktopIconStyles ($parts[0] -eq '1') ($parts.Length -gt 1 -and $parts[1] -eq '1');
+        Write-Output 'ok'
+      } elseif ($line.StartsWith('hide:')) {
+        $target = [IntPtr]::new([int64]$line.Substring(5));
+        [FocusGrant]::ShowWindow($target, 0) | Out-Null
         Write-Output 'ok'
       }
     } catch {
@@ -350,19 +404,24 @@ function startDesktopLayerWatch() {
   desktopLayer.timer = setInterval(updateDesktopLayer, 60);
 }
 
-function showWindow() {
+function presentWindow(focus = true) {
   if (!mainWindow) return;
   if (mainWindow.isMinimized()) mainWindow.restore();
-  if (!mainWindow.isVisible()) mainWindow.show();
+  if (focus) mainWindow.show();
+  else mainWindow.showInactive();
   desktopLayer.summon = true;
   desktopLayer.raised = latestSettings.desktopIconLayer === 'above' ? false : latestSettings.desktopIconLayer === 'below' ? true : null;
-  if (!isQuitting) {
+  if (focus && !isQuitting) {
     mainWindow.focus();
     mainWindow.webContents.focus();
     grantOsFocus();
   }
-  attachToDesktop();
+  attachToDesktop(true);
   updateDesktopLayer();
+}
+
+function showWindow() {
+  presentWindow(true);
 }
 
 function minimizeWindow() {
@@ -371,6 +430,7 @@ function minimizeWindow() {
   setDesktopStyles(false, false);
   mainWindow?.setResizable(false);
   mainWindow?.hide();
+  sendDesktopCommand('hide');
 }
 
 function toggleWindow() {
@@ -546,8 +606,7 @@ function createWindow() {
     mainWindow.loadFile(path.join(__dirname, '..', 'dist', 'index.html'));
   }
 
-  mainWindow.once('ready-to-show', attachToDesktop);
-  mainWindow.on('show', attachToDesktop);
+  mainWindow.once('ready-to-show', () => presentWindow(false));
   mainWindow.on('minimize', minimizeWindow);
   mainWindow.on('close', saveWindowBounds);
   mainWindow.webContents.on('render-process-gone', () => {
@@ -595,7 +654,9 @@ if (!hasSingleInstanceLock) {
     startDesktopLayerWatch();
     await applyIntegrationSettings();
     if (latestSettings.autoCheckUpdates) void checkForUpdatesInBackground();
-    setInterval(attachToDesktop, 30_000);
+    setInterval(() => {
+      if (mainWindow && !mainWindow.isDestroyed() && mainWindow.isVisible()) attachToDesktop();
+    }, 30_000);
     setInterval(() => {
       if (latestSettings.autoCheckUpdates) void checkForUpdatesInBackground();
     }, 12 * 60 * 60 * 1000);

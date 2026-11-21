@@ -45,4 +45,17 @@ describe('state normalization', () => {
     expect(fallback.settings.editorInputStyle).toBe('one-box');
     expect(fallback.settings.desktopIconLayer).toBe('below');
   });
+
+  it('migrates the legacy auto icon layer to below only once', () => {
+    const legacy = normalizeAppState({ settings: { desktopIconLayer: 'auto' } });
+    expect(legacy.settings.desktopIconLayer).toBe('below');
+    expect(legacy.settings.settingsRevision).toBe(2);
+
+    const explicit = normalizeAppState({ settings: { desktopIconLayer: 'auto', settingsRevision: 2 } });
+    expect(explicit.settings.desktopIconLayer).toBe('auto');
+
+    const above = normalizeAppState({ settings: { desktopIconLayer: 'above' } });
+    expect(above.settings.desktopIconLayer).toBe('above');
+    expect(above.settings.settingsRevision).toBe(2);
+  });
 });

@@ -106,6 +106,7 @@ export interface Settings {
   language: 'zh-CN';
   proxyEnabled: boolean;
   proxyServer: string;
+  settingsRevision: number;
 }
 
 export interface AppState {

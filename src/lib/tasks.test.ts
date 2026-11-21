@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { addDays, addMonths, daysBetween, festivalLabel, getCalendarColumns, getCalendarDays, getWeekDays, getWeekNumber, lunarDateLabel, nextRepeatDate, solarTermLabel, toDateKey, yiJiLabel } from './date';
-import { appendNextRecurringTask, rolloverTasks, sortTasks } from './tasks';
+import { extendRecurringTasks, rolloverTasks, sortTasks } from './tasks';
 import type { Task } from '../types';
 
 function task(overrides: Partial<Task> = {}): Task {
@@ -72,6 +72,17 @@ describe('rolloverTasks', () => {
     const result = rolloverTasks(tasks, '2026-11-11', { ...settings, rolloverEnabled: false });
     expect(result.tasks).toBe(tasks);
     expect(result.moved).toBe(0);
+  });
+
+  it('leaves recurring tasks on their own dates', () => {
+    const tasks = [
+      task({ id: 'daily', date: '2026-11-10', repeat: 'daily' }),
+      task({ id: 'plain', date: '2026-11-10' }),
+    ];
+    const result = rolloverTasks(tasks, '2026-11-11', settings);
+    expect(result.tasks.find((item) => item.id === 'daily')?.date).toBe('2026-11-10');
+    expect(result.tasks.find((item) => item.id === 'plain')?.date).toBe('2026-11-11');
+    expect(result.moved).toBe(1);
   });
 });
 
@@ -168,28 +179,42 @@ describe('calendar labels and recurrence dates', () => {
   });
 });
 
-describe('appendNextRecurringTask', () => {
-  it('creates the next unfinished occurrence and links the series', () => {
-    const completed = task({ completed: true, repeat: 'weekly' });
-    const result = appendNextRecurringTask([completed], completed, '00000000-0000-4000-8000-000000000001');
-    expect(result).toHaveLength(2);
-    expect(result[0].seriesId).toBe(completed.id);
-    expect(result[1]).toMatchObject({
-      id: '00000000-0000-4000-8000-000000000001',
-      date: '2026-11-17',
+describe('extendRecurringTasks', () => {
+  it('pre-creates a daily series through the horizon', () => {
+    const seed = task({ date: '2026-11-11', repeat: 'daily' });
+    const result = extendRecurringTasks([seed], '2026-11-11');
+    expect(result.added).toBe(120);
+    expect(result.tasks).toHaveLength(121);
+    expect(result.tasks.find((item) => item.id === 'task-1')?.seriesId).toBe('task-1');
+    expect(result.tasks.find((item) => item.date === '2026-11-12')).toMatchObject({
       completed: false,
-      rolloverCount: 0,
-      repeat: 'weekly',
-      seriesId: completed.id,
+      seriesId: 'task-1',
+      originalDate: '2026-11-12',
     });
+    expect(result.tasks.some((item) => item.date === '2027-03-11')).toBe(true);
+    expect(result.tasks.some((item) => item.date === '2027-03-12')).toBe(false);
   });
 
-  it('does not duplicate an existing next occurrence', () => {
-    const completed = task({ completed: true, repeat: 'daily' });
-    const once = appendNextRecurringTask([completed], completed, '00000000-0000-4000-8000-000000000001');
-    const twice = appendNextRecurringTask(once, completed, '00000000-0000-4000-8000-000000000002');
-    expect(twice).toHaveLength(2);
-    expect(twice.filter((item) => item.date === '2026-11-11')).toHaveLength(1);
+  it('copies the latest occurrence and keeps the series idempotent', () => {
+    const seed = task({ date: '2026-11-11', repeat: 'weekly', title: '周报', time: '09:00', color: 'mint' });
+    const once = extendRecurringTasks([seed], '2026-11-11');
+    const next = once.tasks.find((item) => item.date === '2026-11-18');
+    expect(next).toMatchObject({ title: '周报', time: '09:00', color: 'mint', repeat: 'weekly', seriesId: 'task-1' });
+
+    const twice = extendRecurringTasks(once.tasks, '2026-11-11');
+    expect(twice.added).toBe(0);
+    expect(twice.tasks).toBe(once.tasks);
+    expect(twice.tasks.filter((item) => item.date === '2026-11-18')).toHaveLength(1);
+  });
+
+  it('creates the next yearly occurrence and leaves plain tasks alone', () => {
+    const yearly = extendRecurringTasks([task({ repeat: 'yearly' })], '2026-11-11');
+    expect(yearly.tasks.some((item) => item.date === '2027-11-10')).toBe(true);
+
+    const plainTasks = [task()];
+    const plain = extendRecurringTasks(plainTasks, '2026-11-11');
+    expect(plain.added).toBe(0);
+    expect(plain.tasks).toBe(plainTasks);
   });
 });
 

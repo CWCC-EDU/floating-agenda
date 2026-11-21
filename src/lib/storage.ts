@@ -77,6 +77,7 @@ export const DEFAULT_SETTINGS: Settings = {
   language: 'zh-CN',
   proxyEnabled: false,
   proxyServer: '',
+  settingsRevision: 2,
 };
 
 const BOOLEAN_KEYS = [
@@ -183,6 +184,11 @@ export function normalizeAppState(value: unknown): AppState {
   settings.noteFontFamily = enumValue(raw.noteFontFamily, ['Microsoft YaHei', 'Segoe UI', 'PingFang SC', 'SimSun'] as const, settings.noteFontFamily);
   settings.editorInputStyle = enumValue(raw.editorInputStyle, ['one-box', 'multi-row'] as const, settings.editorInputStyle);
   settings.desktopIconLayer = enumValue(raw.desktopIconLayer, ['auto', 'above', 'below'] as const, settings.desktopIconLayer);
+  const savedRevision = typeof raw.settingsRevision === 'number' ? raw.settingsRevision : 0;
+  if (savedRevision < 2 && settings.desktopIconLayer === 'auto') {
+    settings.desktopIconLayer = 'below';
+  }
+  settings.settingsRevision = 2;
   settings.festivalRegion = 'CN';
   settings.language = 'zh-CN';
 
