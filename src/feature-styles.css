@@ -103,7 +103,9 @@ select { font: inherit; }
   backdrop-filter: blur(12px);
   font-family: var(--note-font-family), sans-serif;
 }
-.notes-panel > header { display: flex; flex: 0 0 34px; align-items: center; gap: 6px; padding: 0 7px 0 10px; border-bottom: 1px solid rgba(255, 255, 255, 0.09); }
+.notes-panel > header { display: flex; flex: 0 0 34px; align-items: center; gap: 6px; padding: 0 7px 0 10px; border-bottom: 1px solid rgba(255, 255, 255, 0.09); cursor: grab; user-select: none; touch-action: none; }
+.notes-panel.is-dragging { user-select: none; }
+.notes-panel.is-dragging > header { cursor: grabbing; }
 .notes-panel > header strong { flex: 1; font-size: 11px; font-weight: 500; }
 .notes-panel > header button { display: grid; width: 25px; height: 25px; padding: 0; place-items: center; border: 0; border-radius: 4px; color: inherit; background: transparent; cursor: pointer; }
 .notes-panel > header button:hover { background: rgba(255, 255, 255, 0.1); }
