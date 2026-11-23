@@ -40,6 +40,16 @@ export default function App() {
 
   useEffect(() => {
     if (!isElectron) return;
+    const onFocusIn = (event: FocusEvent) => {
+      const target = event.target as HTMLElement | null;
+      if (target?.closest('input, textarea, [contenteditable="true"]')) void window.desktop?.beginInput();
+    };
+    document.addEventListener('focusin', onFocusIn);
+    return () => document.removeEventListener('focusin', onFocusIn);
+  }, [isElectron]);
+
+  useEffect(() => {
+    if (!isElectron) return;
     const requestFocus = (event: globalThis.PointerEvent) => {
       const target = event.target as HTMLElement | null;
       const editable = target?.closest<HTMLElement>('input, textarea, [contenteditable="true"]');

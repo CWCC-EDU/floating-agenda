@@ -148,6 +148,7 @@ export interface DesktopBridge {
   minimizeWindow: () => Promise<void>;
   focusWindow: () => Promise<boolean>;
   setInteractionActive: (active: boolean) => Promise<void>;
+  beginInput: () => Promise<boolean>;
   setWindowAdjustmentMode: (enabled: boolean) => Promise<void>;
   startWindowAdjustment: (mode: WindowAdjustmentMode, resizeEdges?: WindowResizeEdge) => Promise<void>;
   updateWindowAdjustment: () => Promise<void>;

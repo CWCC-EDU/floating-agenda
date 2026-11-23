@@ -27,6 +27,13 @@ let adjustment = null;
 let interactionHold = false;
 let integrationSignature = '';
 let focusHelper = null;
+let helperBuffer = '';
+let foregroundWaiter = null;
+let desktopDetached = false;
+let detachedAt = 0;
+let detachedWatch = null;
+let foregroundProbe = false;
+let contextMenuOpen = false;
 const desktopLayer = { raised: null, summon: false, timer: null, ticks: 0, styleThrough: null, styleBleed: null };
 
 const statePath = () => path.join(app.getPath('userData'), 'floating-agenda.json');
@@ -211,6 +218,12 @@ const FOCUS_HELPER_SCRIPT = `
     [DllImport("user32.dll")] public static extern IntPtr SetWindowLongPtr(IntPtr hWnd, int nIndex, IntPtr dwNewLong);
     [DllImport("user32.dll")] public static extern bool RedrawWindow(IntPtr hWnd, IntPtr lprcUpdate, IntPtr hrgnUpdate, uint flags);
     [DllImport("user32.dll")] public static extern bool ShowWindow(IntPtr hWnd, int nCmdShow);
+    [DllImport("user32.dll", SetLastError = true)] public static extern IntPtr SetParent(IntPtr hWndChild, IntPtr hWndNewParent);
+    [DllImport("user32.dll", SetLastError = true)] public static extern IntPtr GetParent(IntPtr hWnd);
+    [DllImport("user32.dll")] public static extern bool GetWindowRect(IntPtr hWnd, out RECT lpRect);
+    [DllImport("user32.dll")] public static extern bool SetForegroundWindow(IntPtr hWnd);
+    [DllImport("user32.dll")] public static extern bool BringWindowToTop(IntPtr hWnd);
+    [StructLayout(LayoutKind.Sequential)] public struct RECT { public int Left; public int Top; public int Right; public int Bottom; }
     public delegate bool EnumWindowsProc(IntPtr hWnd, IntPtr lParam);
     [DllImport("user32.dll")] public static extern bool EnumWindows(EnumWindowsProc lpEnumFunc, IntPtr lParam);
     public static IntPtr FindDesktopDefView() {
@@ -274,6 +287,37 @@ const FOCUS_HELPER_SCRIPT = `
         if ($targetThread -ne $current -and $targetThread -ne $fgThread) { [FocusGrant]::AttachThreadInput($current, $targetThread, $false) | Out-Null }
         if ($fgThread -ne 0 -and $fgThread -ne $current) { [FocusGrant]::AttachThreadInput($current, $fgThread, $false) | Out-Null }
         Write-Output 'ok'
+      } elseif ($line.StartsWith('fg:')) {
+        $target = [IntPtr]::new([int64]$line.Substring(3));
+        if ([FocusGrant]::GetForegroundWindow() -eq $target) { Write-Output 'fg:1' } else { Write-Output 'fg:0' }
+      } elseif ($line.StartsWith('detach:')) {
+        $target = [IntPtr]::new([int64]$line.Substring(7));
+        $parent = [FocusGrant]::GetParent($target);
+        if ($parent -ne [IntPtr]::Zero) {
+          $rect = New-Object FocusGrant+RECT;
+          [FocusGrant]::GetWindowRect($target, [ref]$rect) | Out-Null;
+          [FocusGrant]::SetParent($target, [IntPtr]::Zero) | Out-Null;
+          $style = [FocusGrant]::GetWindowLongPtr($target, -16).ToInt64();
+          $nextStyle = ($style -band (-bnot 0x40000000)) -bor 0x80000000;
+          [FocusGrant]::SetWindowLongPtr($target, -16, [IntPtr]::new($nextStyle)) | Out-Null;
+          [FocusGrant]::ShowWindow($target, 5) | Out-Null;
+          [FocusGrant]::SetWindowPos($target, [IntPtr]::Zero, $rect.Left, $rect.Top, ($rect.Right - $rect.Left), ($rect.Bottom - $rect.Top), 0x0030) | Out-Null;
+        }
+        $current = [FocusGrant]::GetCurrentThreadId();
+        $foreground = [FocusGrant]::GetForegroundWindow();
+        $fgPid = 0;
+        $fgThread = 0;
+        if ($foreground -ne [IntPtr]::Zero) { $fgThread = [FocusGrant]::GetWindowThreadProcessId($foreground, [ref]$fgPid) }
+        $targetPid = 0;
+        $targetThread = [FocusGrant]::GetWindowThreadProcessId($target, [ref]$targetPid);
+        if ($fgThread -ne 0 -and $fgThread -ne $current) { [FocusGrant]::AttachThreadInput($current, $fgThread, $true) | Out-Null }
+        if ($targetThread -ne $current -and $targetThread -ne $fgThread) { [FocusGrant]::AttachThreadInput($current, $targetThread, $true) | Out-Null }
+        [FocusGrant]::SetForegroundWindow($target) | Out-Null;
+        [FocusGrant]::BringWindowToTop($target) | Out-Null;
+        [FocusGrant]::SetFocus($target) | Out-Null;
+        if ($targetThread -ne $current -and $targetThread -ne $fgThread) { [FocusGrant]::AttachThreadInput($current, $targetThread, $false) | Out-Null }
+        if ($fgThread -ne 0 -and $fgThread -ne $current) { [FocusGrant]::AttachThreadInput($current, $fgThread, $false) | Out-Null }
+        Write-Output ('detached:' + ([FocusGrant]::GetForegroundWindow() -eq $target))
       } elseif ($line.StartsWith('raise:')) {
         $target = [IntPtr]::new([int64]$line.Substring(6));
         [FocusGrant]::SetWindowPos($target, [IntPtr]::Zero, 0, 0, 0, 0, 0x0013) | Out-Null
@@ -312,7 +356,21 @@ function ensureFocusHelper() {
   ], { windowsHide: true });
   let stderr = '';
   child.stdin.on('error', () => {});
-  child.stdout.on('data', () => {});
+  child.stdout.on('data', (data) => {
+    helperBuffer += data.toString();
+    let index;
+    while ((index = helperBuffer.indexOf('\n')) >= 0) {
+      const line = helperBuffer.slice(0, index).trim();
+      helperBuffer = helperBuffer.slice(index + 1);
+      if (line.startsWith('fg:') && foregroundWaiter) {
+        const waiter = foregroundWaiter;
+        foregroundWaiter = null;
+        waiter(line === 'fg:1');
+      } else if (line.startsWith('err:')) {
+        logDesktop(`focus helper error ${line.slice(4)}`);
+      }
+    }
+  });
   child.stderr.on('data', (data) => { stderr += data.toString(); });
   child.on('error', (error) => console.error('Unable to start focus helper:', error));
   child.on('close', (code) => {
@@ -347,6 +405,98 @@ function sendDesktopCommand(command) {
   }
 }
 
+// IME composition needs a real foreground top-level window; a WS_CHILD parented to
+// Progman never receives an input context, so lift the window out of the desktop
+// while the user is typing and embed it again once another window takes focus.
+function isWindowForeground() {
+  return new Promise((resolve) => {
+    if (process.platform !== 'win32' || !mainWindow || mainWindow.isDestroyed()) {
+      resolve(true);
+      return;
+    }
+    const helper = ensureFocusHelper();
+    if (!helper || helper.stdin.destroyed) {
+      resolve(true);
+      return;
+    }
+    if (foregroundWaiter) {
+      const previous = foregroundWaiter;
+      foregroundWaiter = null;
+      previous(true);
+    }
+    let settled = false;
+    foregroundWaiter = (value) => {
+      if (settled) return;
+      settled = true;
+      resolve(value);
+    };
+    const handle = mainWindow.getNativeWindowHandle().readBigUInt64LE(0).toString();
+    try {
+      helper.stdin.write(`fg:${handle}\n`);
+    } catch {
+      focusHelper = null;
+      foregroundWaiter = null;
+      resolve(true);
+      return;
+    }
+    setTimeout(() => {
+      if (settled) return;
+      settled = true;
+      foregroundWaiter = null;
+      resolve(true);
+    }, 900);
+  });
+}
+
+function stopDetachedWatch() {
+  if (detachedWatch) clearInterval(detachedWatch);
+  detachedWatch = null;
+}
+
+function startDetachedWatch() {
+  if (detachedWatch) return;
+  detachedWatch = setInterval(async () => {
+    if (!desktopDetached || !mainWindow || mainWindow.isDestroyed()) {
+      stopDetachedWatch();
+      return;
+    }
+    if (foregroundProbe || contextMenuOpen || Date.now() - detachedAt < 1200) return;
+    foregroundProbe = true;
+    const foreground = await isWindowForeground();
+    foregroundProbe = false;
+    if (foreground || !desktopDetached || !mainWindow || mainWindow.isDestroyed()) return;
+    desktopDetached = false;
+    stopDetachedWatch();
+    logDesktop('reattach after focus loss');
+    attachToDesktop(mainWindow.isVisible());
+    updateDesktopLayer();
+  }, 800);
+}
+
+function liftWindowForInput() {
+  if (process.platform !== 'win32' || !mainWindow || mainWindow.isDestroyed()) return false;
+  if (!desktopDetached) {
+    desktopDetached = true;
+    detachedAt = Date.now();
+    const helper = ensureFocusHelper();
+    const handle = mainWindow.getNativeWindowHandle().readBigUInt64LE(0).toString();
+    if (helper && !helper.stdin.destroyed) {
+      try {
+        helper.stdin.write(`detach:${handle}\n`);
+      } catch {
+        focusHelper = null;
+      }
+    }
+    logDesktop(`lift for input hwnd=${handle}`);
+  }
+  startDetachedWatch();
+  if (!mainWindow.isVisible()) mainWindow.show();
+  mainWindow.focus();
+  mainWindow.webContents.focus();
+  grantOsFocus();
+  return desktopDetached;
+}
+
 function setDesktopLayer(raised) {
   if (desktopLayer.raised === raised) return;
   desktopLayer.raised = raised;
@@ -378,6 +528,10 @@ function updateDesktopLayer() {
     setDesktopStyles(false, false);
     return;
   }
+  if (desktopDetached) {
+    setDesktopStyles(false, false);
+    return;
+  }
   desktopLayer.ticks = (desktopLayer.ticks + 1) % 50;
   const force = desktopLayer.ticks === 0;
   const point = screen.getCursorScreenPoint();
@@ -406,6 +560,8 @@ function startDesktopLayerWatch() {
 
 function presentWindow(focus = true) {
   if (!mainWindow) return;
+  desktopDetached = false;
+  stopDetachedWatch();
   if (mainWindow.isMinimized()) mainWindow.restore();
   if (focus) mainWindow.show();
   else mainWindow.showInactive();
@@ -427,6 +583,8 @@ function showWindow() {
 function minimizeWindow() {
   adjustment = null;
   desktopLayer.summon = false;
+  desktopDetached = false;
+  stopDetachedWatch();
   setDesktopStyles(false, false);
   mainWindow?.setResizable(false);
   mainWindow?.hide();
@@ -609,6 +767,38 @@ function createWindow() {
   mainWindow.once('ready-to-show', () => presentWindow(false));
   mainWindow.on('minimize', minimizeWindow);
   mainWindow.on('close', saveWindowBounds);
+  mainWindow.webContents.on('context-menu', (_event, params) => {
+    const editFlags = params.editFlags || {};
+    const template = [];
+    if (params.isEditable) {
+      template.push(
+        { label: '撤销', role: 'undo', enabled: editFlags.canUndo !== false },
+        { label: '重做', role: 'redo', enabled: editFlags.canRedo !== false },
+        { type: 'separator' },
+        { label: '剪切', role: 'cut', enabled: editFlags.canCut !== false },
+        { label: '复制', role: 'copy', enabled: editFlags.canCopy !== false },
+        { label: '粘贴', role: 'paste', enabled: editFlags.canPaste !== false },
+        { type: 'separator' },
+        { label: '全选', role: 'selectAll', enabled: editFlags.canSelectAll !== false },
+      );
+    } else if (typeof params.selectionText === 'string' && params.selectionText.trim()) {
+      template.push(
+        { label: '复制', role: 'copy' },
+        { type: 'separator' },
+        { label: '全选', role: 'selectAll' },
+      );
+    } else {
+      return;
+    }
+    liftWindowForInput();
+    const menu = Menu.buildFromTemplate(template);
+    contextMenuOpen = true;
+    menu.once('menu-will-close', () => {
+      contextMenuOpen = false;
+      if (desktopDetached) startDetachedWatch();
+    });
+    menu.popup({ window: mainWindow, x: Math.round(params.x), y: Math.round(params.y) });
+  });
   mainWindow.webContents.on('render-process-gone', () => {
     if (!isQuitting && mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.reload();
   });
@@ -655,7 +845,7 @@ if (!hasSingleInstanceLock) {
     await applyIntegrationSettings();
     if (latestSettings.autoCheckUpdates) void checkForUpdatesInBackground();
     setInterval(() => {
-      if (mainWindow && !mainWindow.isDestroyed() && mainWindow.isVisible()) attachToDesktop();
+      if (!desktopDetached && mainWindow && !mainWindow.isDestroyed() && mainWindow.isVisible()) attachToDesktop();
     }, 30_000);
     setInterval(() => {
       if (latestSettings.autoCheckUpdates) void checkForUpdatesInBackground();
@@ -712,6 +902,8 @@ ipcMain.handle('desktop:interactive', (_event, active) => {
   interactionHold = active === true;
   updateDesktopLayer();
 });
+
+ipcMain.handle('desktop:begin-input', () => liftWindowForInput());
 
 ipcMain.handle('window:focus', () => {
   if (!mainWindow || mainWindow.isDestroyed()) return false;
