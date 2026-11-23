@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { addDays, addMonths, daysBetween, festivalLabel, getCalendarColumns, getCalendarDays, getWeekDays, getWeekNumber, lunarDateLabel, nextRepeatDate, solarTermLabel, toDateKey, yiJiLabel } from './date';
-import { extendRecurringTasks, rolloverTasks, sortTasks } from './tasks';
+import { extendRecurringTasks, removeTaskSeries, rolloverTasks, sortTasks } from './tasks';
 import type { Task } from '../types';
 
 function task(overrides: Partial<Task> = {}): Task {
@@ -215,6 +215,18 @@ describe('extendRecurringTasks', () => {
     const plain = extendRecurringTasks(plainTasks, '2026-11-11');
     expect(plain.added).toBe(0);
     expect(plain.tasks).toBe(plainTasks);
+  });
+});
+
+describe('removeTaskSeries', () => {
+  it('removes every occurrence in the series and keeps unrelated tasks', () => {
+    const tasks = [
+      task({ id: 'seed', date: '2026-11-10', repeat: 'daily', seriesId: 'seed' }),
+      task({ id: 'future', date: '2026-11-11', repeat: 'daily', seriesId: 'seed' }),
+      task({ id: 'done', date: '2026-11-09', repeat: 'daily', seriesId: 'seed', completed: true }),
+      task({ id: 'plain', date: '2026-11-11' }),
+    ];
+    expect(removeTaskSeries(tasks, 'seed').map((item) => item.id)).toEqual(['plain']);
   });
 });
 

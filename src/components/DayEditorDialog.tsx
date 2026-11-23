@@ -126,12 +126,13 @@ interface DayEditorDialogProps {
   settings: Settings;
   onAutoSave: (tasks: Task[]) => void;
   onSave: (tasks: Task[]) => void;
+  onCancelSeries: (taskId: string) => void;
   onClose: () => void;
 }
 
 const AUTO_SAVE_DELAY = 400;
 
-export function DayEditorDialog({ date, tasks, initialTaskId, settings, onAutoSave, onSave, onClose }: DayEditorDialogProps) {
+export function DayEditorDialog({ date, tasks, initialTaskId, settings, onAutoSave, onSave, onCancelSeries, onClose }: DayEditorDialogProps) {
   const initialRows = [...sortTasks(tasks, settings.completedToBottom), createEmptyTask(date)];
   const multiRow = settings.editorInputStyle === 'multi-row';
   const [rows, setRows] = useState<Task[]>(initialRows);
@@ -544,8 +545,14 @@ export function DayEditorDialog({ date, tasks, initialTaskId, settings, onAutoSa
                     key={option.value}
                     className={selected?.repeat === option.value ? 'is-active' : ''}
                     onClick={() => {
-                      updateSelected({ repeat: option.value });
                       setShowRepeat(false);
+                      if (option.value === 'none' && selected?.repeat !== 'none') {
+                        if (!window.confirm('取消重复会删除这一系列在所有日期上的日程，确定吗？')) return;
+                        onCancelSeries(selected.id);
+                        removeSelectedLine();
+                        return;
+                      }
+                      updateSelected({ repeat: option.value });
                     }}
                   >{option.label}{selected?.repeat === option.value && <Check size={12} />}</button>
                 ))}

@@ -4,7 +4,7 @@ import { DayEditorDialog } from './components/DayEditorDialog';
 import { NotesPanel } from './components/NotesPanel';
 import { SettingsDialog } from './components/SettingsDialog';
 import { addMonths, festivalLabel, fromDateKey, fullDateLabel, getCalendarColumns, getCalendarDays, getWeekNumber, lunarDateLabel, monthLabel, shortDateLabel, solarTermLabel, startOfMonth, toDateKey, yiJiLabel } from './lib/date';
-import { extendRecurringTasks, rolloverTasks, sortTasks } from './lib/tasks';
+import { extendRecurringTasks, removeTaskSeries, rolloverTasks, sortTasks } from './lib/tasks';
 import { DEFAULT_SETTINGS, loadAppState, saveAppState } from './lib/storage';
 import { readableTextColor, taskFontSize } from './lib/appearance';
 import { playSound } from './lib/sound';
@@ -227,6 +227,14 @@ export default function App() {
     setToast('当天日程已保存');
   }
 
+  function cancelTaskSeries(taskId: string) {
+    const target = state.tasks.find((task) => task.id === taskId);
+    const seriesId = target?.seriesId ?? (target && target.repeat !== 'none' ? target.id : undefined);
+    if (!seriesId) return;
+    setState((current) => ({ ...current, tasks: removeTaskSeries(current.tasks, seriesId) }));
+    setToast('已删除该重复任务的全部日程');
+  }
+
   function toggleTaskCompletion(task: Task) {
     setState((current) => {
       const updated = { ...task, completed: !task.completed, completedAt: task.completed ? undefined : new Date().toISOString() };
@@ -420,7 +428,7 @@ export default function App() {
         </>}
 
         {!isReady && <div className="loading-cover"><span /><p>正在整理你的日历…</p></div>}
-        {editor && <DayEditorDialog date={editor.date} tasks={tasksByDate.get(editor.date) ?? []} initialTaskId={editor.taskId} settings={state.settings} onAutoSave={(tasks) => saveDayTasks(editor.date, tasks, false)} onSave={(tasks) => saveDayTasks(editor.date, tasks)} onClose={() => setEditor(null)} />}
+        {editor && <DayEditorDialog date={editor.date} tasks={tasksByDate.get(editor.date) ?? []} initialTaskId={editor.taskId} settings={state.settings} onAutoSave={(tasks) => saveDayTasks(editor.date, tasks, false)} onSave={(tasks) => saveDayTasks(editor.date, tasks)} onCancelSeries={cancelTaskSeries} onClose={() => setEditor(null)} />}
         {showSettings && <SettingsDialog settings={state.settings} isElectron={isElectron} onChange={updateSettings} onClose={() => setShowSettings(false)} onOpenNotes={() => { setShowSettings(false); setState((current) => ({ ...current, settings: { ...current.settings, showNotes: true } })); }} />}
         {toast && <div className="toast" role="status"><ListChecks size={16} />{toast}</div>}
       </section>

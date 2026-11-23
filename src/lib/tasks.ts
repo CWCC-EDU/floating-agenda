@@ -94,6 +94,10 @@ export function extendRecurringTasks(tasks: Task[], today: string): RecurrenceEx
   return { tasks: [...linked, ...additions], added: additions.length };
 }
 
+export function removeTaskSeries(tasks: Task[], seriesId: string): Task[] {
+  return tasks.filter((task) => task.seriesId !== seriesId);
+}
+
 export function sortTasks(tasks: Task[], completedToBottom = true): Task[] {
   return [...tasks].sort((a, b) => {
     if (completedToBottom && a.completed !== b.completed) return Number(a.completed) - Number(b.completed);
