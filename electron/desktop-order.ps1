@@ -13,8 +13,13 @@ using Accessibility;
 
 public static class AgendaDesktopOrder {
     private const int GWL_EXSTYLE = -20;
+    private const int GWLP_HWNDPARENT = -8;
+    private const uint GW_OWNER = 4;
     private const long WS_EX_TOPMOST = 0x00000008;
+    private const long WS_EX_TOOLWINDOW = 0x00000080;
+    private const long WS_EX_APPWINDOW = 0x00040000;
     private const uint PositionOnly = 0x4213; // No size, move, activation or owner changes. Use an async request.
+    private const uint RefreshWindowStyle = 0x0237; // Frame changed without moving, activating, or reordering the window.
     private static readonly IntPtr Topmost = new IntPtr(-1);
     private static IntPtr desktopPresentation;
     private static bool desktopWasTopmost;
@@ -23,6 +28,9 @@ public static class AgendaDesktopOrder {
     private static readonly long DesktopSettleTicks = Stopwatch.Frequency * 300 / 1000;
     private static readonly IntPtr NotTopmost = new IntPtr(-2);
     private static readonly Dictionary<IntPtr, string> Regions = new Dictionary<IntPtr, string>();
+    private static IntPtr previousCalendar;
+    private static IntPtr configuredCalendar;
+    private static IntPtr configuredOwner;
     private static IntPtr iconList;
     private static DesktopIconBounds.Rectangle[] icons = new DesktopIconBounds.Rectangle[0];
     private static Task<DesktopIconBounds.Rectangle[]> iconRead;
@@ -34,11 +42,12 @@ public static class AgendaDesktopOrder {
     private struct Rect { public int Left, Top, Right, Bottom; }
 
     [DllImport("user32.dll")] private static extern bool EnumWindows(EnumWindowsProc callback, IntPtr data);
-    [DllImport("user32.dll", CharSet = CharSet.Unicode)] private static extern IntPtr FindWindow(string windowClass, string title);
     [DllImport("user32.dll", CharSet = CharSet.Unicode)] private static extern IntPtr FindWindowEx(IntPtr parent, IntPtr after, string windowClass, string title);
     [DllImport("user32.dll")] private static extern IntPtr GetWindow(IntPtr hwnd, uint command);
     [DllImport("user32.dll")] private static extern IntPtr GetForegroundWindow();
     [DllImport("user32.dll")] private static extern IntPtr GetWindowLongPtr(IntPtr hwnd, int index);
+    [DllImport("user32.dll", EntryPoint = "SetWindowLongPtrW")]
+    private static extern IntPtr SetWindowLongPtr(IntPtr hwnd, int index, IntPtr value);
     [DllImport("user32.dll")] private static extern bool IsWindowVisible(IntPtr hwnd);
     [DllImport("user32.dll")] private static extern bool IsIconic(IntPtr hwnd);
     [DllImport("user32.dll")] private static extern bool ShowWindowAsync(IntPtr hwnd, int command);
@@ -73,7 +82,6 @@ public static class AgendaDesktopOrder {
         if (SendMessageTimeout(shell, 0, IntPtr.Zero, IntPtr.Zero, 2, 350, out result) == IntPtr.Zero)
             return "unavailable";
         if (GetLastActivePopup(shell) != shell) return "busy";
-        const uint GW_OWNER = 4;
         bool hasPopup = false;
         EnumWindows(delegate(IntPtr hwnd, IntPtr data) {
             if (IsWindowVisible(hwnd) && GetWindow(hwnd, GW_OWNER) == shell) hasPopup = true;
@@ -94,6 +102,26 @@ public static class AgendaDesktopOrder {
 
     private static bool IsTopmost(IntPtr hwnd) {
         return (GetWindowLongPtr(hwnd, GWL_EXSTYLE).ToInt64() & WS_EX_TOPMOST) != 0;
+    }
+
+    private static bool BindCalendarToDesktop(IntPtr calendar, IntPtr shell) {
+        if (calendar == IntPtr.Zero || shell == IntPtr.Zero) return false;
+        if (configuredCalendar != calendar || configuredOwner != shell) {
+            configuredCalendar = calendar;
+            configuredOwner = shell;
+            // Keep the calendar a top-level window. Explorer's desktop is its owner, so its
+            // Show Desktop ordering follows the shell without toggling the calendar's topmost bit.
+            SetWindowLongPtr(calendar, GWLP_HWNDPARENT, shell);
+            if (GetWindow(calendar, GW_OWNER) == shell) {
+                long style = GetWindowLongPtr(calendar, GWL_EXSTYLE).ToInt64();
+                long toolStyle = (style | WS_EX_TOOLWINDOW) & ~WS_EX_APPWINDOW;
+                if (toolStyle != style) {
+                    SetWindowLongPtr(calendar, GWL_EXSTYLE, new IntPtr(toolStyle));
+                    SetWindowPos(calendar, IntPtr.Zero, 0, 0, 0, 0, RefreshWindowStyle);
+                }
+            }
+        }
+        return GetWindow(calendar, GW_OWNER) == shell;
     }
 
     private static bool IsDesktopSettled(IntPtr calendar, bool needsPresentation) {
@@ -213,7 +241,7 @@ public static class AgendaDesktopOrder {
         var widgets = new HashSet<IntPtr>(windows);
         if (calendar != IntPtr.Zero) widgets.Add(calendar);
         var order = new List<IntPtr>();
-        IntPtr shell = FindWindow("Progman", null);
+        IntPtr shell = GetShellWindow();
         IntPtr iconHost = IntPtr.Zero;
         IntPtr defView = IntPtr.Zero;
         EnumWindows(delegate(IntPtr hwnd, IntPtr data) {
@@ -234,9 +262,10 @@ public static class AgendaDesktopOrder {
         }
 
         IntPtr desktopHost = iconHost != IntPtr.Zero ? iconHost : shell;
+        bool followsDesktop = BindCalendarToDesktop(calendar, shell != IntPtr.Zero ? shell : desktopHost);
         IntPtr foreground = GetForegroundWindow();
         bool desktopForeground = foreground != IntPtr.Zero && (foreground == shell || foreground == desktopHost);
-        bool usingDesktop = desktopForeground || (desktopPresentation == calendar && widgets.Contains(foreground));
+        bool usingDesktop = !followsDesktop && (desktopForeground || (desktopPresentation == calendar && widgets.Contains(foreground)));
         bool restoreCalendar = calendar != IntPtr.Zero && desktopForeground
             && (IsIconic(calendar) || !IsWindowVisible(calendar));
 
@@ -258,9 +287,9 @@ public static class AgendaDesktopOrder {
                 afterIndex = i;
             }
 
-            // A window already above the calendar is occluded by Windows.
-            // Its moving bounds cannot change the calendar's own region.
-            bool needsCut = calendarIndex >= 0 && i > calendarIndex;
+            // Let the native stacking order cover a desktop-owned calendar.
+            // Keep fallback clipping only for systems that need the topmost workaround.
+            bool needsCut = !followsDesktop && calendarIndex >= 0 && i > calendarIndex;
             Rect bounds;
             if ((needsCut || checkLift) && TryGetApplicationBounds(hwnd, out bounds)) {
                 if (checkLift) applications.Add(bounds);
@@ -280,15 +309,24 @@ public static class AgendaDesktopOrder {
         bool desktopSettled = IsDesktopSettled(calendar, liftWidgets || restoreCalendar);
         desktopPresentation = liftWidgets && desktopSettled ? calendar : IntPtr.Zero;
         desktopWasTopmost = desktopPresentation != IntPtr.Zero && calendarTopmost;
-        if (desktopSettled && restoreCalendar)
+        if ((followsDesktop || desktopSettled) && restoreCalendar)
             ShowWindowAsync(calendar, 4); // SW_SHOWNOACTIVATE
         if (calendar != IntPtr.Zero) {
+            if (previousCalendar != calendar) {
+                // Clear a region left by a previous helper process on first placement.
+                Regions[calendar] = "initial";
+                previousCalendar = calendar;
+            }
             Rect bounds;
-            if (order.IndexOf(foreground) > desktop && !widgets.Contains(foreground)
+            if (!followsDesktop && order.IndexOf(foreground) > desktop && !widgets.Contains(foreground)
                 && IsApplicationWindow(foreground) && TryGetApplicationBounds(foreground, out bounds))
                 coveringCalendar.Add(bounds);
             SetCalendarRegion(calendar, iconsAbove, coveringCalendar);
         }
+
+        // The owned window follows Explorer into Show Desktop. Avoid placing it
+        // at HWND_TOP again while Explorer is reordering its desktop.
+        if (followsDesktop && desktopForeground && afterIndex < 0) return;
 
         if (liftWidgets) {
             if (!desktopSettled) return;

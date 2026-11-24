@@ -8,6 +8,13 @@ contextBridge.exposeInMainWorld('desktop', {
   loadThemeImage: () => ipcRenderer.invoke('theme:load'),
   saveThemeImage: (bytes) => ipcRenderer.invoke('theme:save', bytes),
   focusCalendarInput: () => ipcRenderer.invoke('calendar:focus-input'),
+  getCalendarDisplays: () => ipcRenderer.invoke('calendar:get-displays'),
+  setCalendarDisplay: (preference) => ipcRenderer.invoke('calendar:set-display', preference),
+  onCalendarDisplays: (callback) => {
+    const listener = (_event, status) => callback(status);
+    ipcRenderer.on('calendar:displays-changed', listener);
+    return () => ipcRenderer.removeListener('calendar:displays-changed', listener);
+  },
   setWindowAdjustmentMode: (enabled) => ipcRenderer.invoke('window:adjust-mode', enabled),
   startWindowAdjustment: (mode, resizeEdges) => ipcRenderer.invoke('window:adjust-start', mode, resizeEdges),
   updateWindowAdjustment: () => ipcRenderer.invoke('window:adjust-update'),

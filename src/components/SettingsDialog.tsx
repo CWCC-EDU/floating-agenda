@@ -1,9 +1,9 @@
-import { useState, type CSSProperties, type KeyboardEvent, type ReactNode } from 'react';
+import { useEffect, useState, type CSSProperties, type KeyboardEvent, type ReactNode } from 'react';
 import { CalendarDays, ChevronRight, Cloud, Info, Keyboard, LayoutGrid, Monitor, RotateCcw, SlidersHorizontal, StickyNote as StickyNoteIcon, Type, X } from 'lucide-react';
 import { DEFAULT_SETTINGS } from '../lib/storage';
 import { importLocalSkin, skinImage, SKIN_OPTIONS } from '../lib/skins';
 import { SyncSettings } from './SyncSettings';
-import type { AppState, NutstoreRemoteSummary, NutstoreSyncResult, NutstoreSyncStatus, BulletStyle, CalendarLayout, DesktopIconLayer, EditorInputStyle, FontFamily, Settings, SkinPosition, SoundEffect, StickyNote, TextBackground, UpdateCheckResult } from '../types';
+import type { AppState, NutstoreRemoteSummary, NutstoreSyncResult, NutstoreSyncStatus, BulletStyle, CalendarDisplayStatus, CalendarLayout, DesktopIconLayer, EditorInputStyle, FontFamily, Settings, SkinPosition, SoundEffect, StickyNote, TextBackground, UpdateCheckResult } from '../types';
 
 type Category = 'calendar' | 'cells' | 'appearance' | 'notes' | 'sync' | 'advanced' | 'about';
 type ShortcutKey = 'showHideShortcut' | 'toggleContentShortcut' | 'toggleNotesShortcut' | 'completeTaskShortcut';
@@ -106,6 +106,35 @@ function SelectRow<T extends string | number>({ title, description, value, optio
       </select>
     </label>
   );
+}
+
+function CalendarDisplaySetting() {
+  const desktop = window.desktop;
+  const [status, setStatus] = useState<CalendarDisplayStatus | null>(null);
+  const [failed, setFailed] = useState(false);
+  useEffect(() => {
+    if (!desktop) return;
+    let active = true;
+    const unsubscribe = desktop.onCalendarDisplays((next) => { setStatus(next); setFailed(false); });
+    void desktop.getCalendarDisplays()
+      .then((next) => { if (active) setStatus(next); })
+      .catch(() => { if (active) setFailed(true); });
+    return () => {
+      active = false;
+      unsubscribe();
+    };
+  }, [desktop]);
+  if (!desktop) return null;
+
+  const options = [{ value: 'primary', label: '主屏幕（默认）' }, ...(status?.options ?? [])];
+  if (status?.usingFallback) options.push({ value: status.selected, label: '首选屏幕（未连接）' });
+  const description = failed ? '无法读取显示屏幕设置'
+    : status?.usingFallback ? '首选屏幕未连接，日历当前显示在主屏幕'
+    : '此设置仅在当前电脑生效';
+  return <SelectRow title="显示屏幕" value={status?.selected ?? 'primary'} options={options}
+    description={description} disabled={!status} onChange={(value) => {
+      void desktop.setCalendarDisplay(value).then((next) => { setStatus(next); setFailed(false); }).catch(() => setFailed(true));
+    }} />;
 }
 
 function ColorRow({ title, value, onChange }: { title: string; value: string; onChange: (value: string) => void }) {
@@ -383,6 +412,7 @@ export function SettingsDialog({ initialCategory, localSkin, onLocalSkinChange, 
 
               {category === 'advanced' && <>
                 <Section title="高级设置">
+                  <CalendarDisplaySetting />
                   <SelectRow title="桌面图标层级" description="日历在图标下方时，重叠的图标仍可点击。普通应用窗口始终优先显示。" value={settings.desktopIconLayer} options={DESKTOP_ICON_LAYERS} disabled={!isElectron} onChange={(desktopIconLayer) => update({ desktopIconLayer })} />
                   <SelectRow title="开始星期" value={settings.weekStartsOn} options={WEEKDAY_NAMES.map((label, value) => ({ value, label }))} onChange={(weekStartsOn) => update({ weekStartsOn })} />
                   <SelectRow title="设置第一周" description="ISO 周或包含 1 月 1 日的第一周" value={settings.weekNumberMode} options={[{ value: 'iso' as const, label: 'ISO 标准周' }, { value: 'jan1' as const, label: '包含 1 月 1 日' }]} onChange={(weekNumberMode) => update({ weekNumberMode })} />

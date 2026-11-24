@@ -206,6 +206,12 @@ export type DesktopMenuAction =
 export type WindowAdjustmentMode = 'move' | 'resize';
 export type WindowResizeEdge = 'n' | 's' | 'e' | 'w' | 'ne' | 'nw' | 'se' | 'sw';
 
+export interface CalendarDisplayStatus {
+  selected: string;
+  usingFallback: boolean;
+  options: { value: string; label: string }[];
+}
+
 export interface UpdateCheckResult {
   status: 'current' | 'available' | 'unavailable';
   message: string;
@@ -220,6 +226,9 @@ export interface DesktopBridge {
   loadThemeImage: () => Promise<string | null>;
   saveThemeImage: (bytes: Uint8Array) => Promise<string>;
   focusCalendarInput: () => Promise<void>;
+  getCalendarDisplays: () => Promise<CalendarDisplayStatus>;
+  setCalendarDisplay: (preference: string) => Promise<CalendarDisplayStatus>;
+  onCalendarDisplays: (callback: (status: CalendarDisplayStatus) => void) => () => void;
   setWindowAdjustmentMode: (enabled: boolean) => Promise<void>;
   startWindowAdjustment: (mode: WindowAdjustmentMode, resizeEdges?: WindowResizeEdge) => Promise<void>;
   updateWindowAdjustment: () => Promise<void>;

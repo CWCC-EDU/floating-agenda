@@ -1,5 +1,6 @@
 const { app, BrowserWindow, dialog, globalShortcut, ipcMain, Menu, nativeImage, net, Notification, screen, session, Tray } = require('electron');
 const { maintainDesktopOrder, moveNoteWindow, repairDesktopInput, stopDesktopOrder } = require('./desktop-order.cjs');
+const { MIN_CALENDAR_WIDTH, MIN_CALENDAR_HEIGHT, calendarIsReachable, placeCalendar } = require('./calendar-bounds.cjs');
 const fs = require('node:fs/promises');
 const fsSync = require('node:fs');
 const path = require('node:path');
@@ -28,6 +29,9 @@ let adjustment = null;
 let integrationSignature = '';
 let stateWrites = Promise.resolve();
 let desktopOrderTimer = null;
+let displayChangeTimer = null;
+let calendarDisplayPreference = 'primary';
+let windowBoundsWrites = Promise.resolve();
 let calendarRequested = false;
 let focusedNote = null;
 let noteToFocus = null;
@@ -47,27 +51,85 @@ const windowBoundsPath = () => path.join(app.getPath('userData'), 'window-bounds
 const notesBoundsPath = () => path.join(app.getPath('userData'), 'notes-bounds.json');
 const iconPath = () => path.join(__dirname, '..', 'build', 'icon.png');
 
-function loadWindowBounds(workArea) {
+function loadWindowBounds() {
   try {
     const saved = JSON.parse(fsSync.readFileSync(windowBoundsPath(), 'utf8'));
+    if (typeof saved.display === 'string' && /^-?\d+$/.test(saved.display)) calendarDisplayPreference = saved.display;
     const width = Math.round(Number(saved.width));
     const height = Math.round(Number(saved.height));
     const x = Math.round(Number(saved.x));
     const y = Math.round(Number(saved.y));
-    if (![width, height, x, y].every(Number.isFinite) || width < 760 || height < 520) return null;
-    const margin = 60;
-    const clampedX = Math.min(Math.max(x, workArea.x + margin - width + 120), workArea.x + workArea.width - 120);
-    const clampedY = Math.min(Math.max(y, workArea.y), workArea.y + workArea.height - margin);
-    return { x: clampedX, y: clampedY, width, height };
+    if (![width, height, x, y].every(Number.isFinite) || width <= 0 || height <= 0) return null;
+    return { x, y, width, height };
   } catch {
     return null;
   }
 }
 
+function preferredCalendarDisplay() {
+  return screen.getAllDisplays().find(display => String(display.id) === calendarDisplayPreference) ?? screen.getPrimaryDisplay();
+}
+
+function calendarDisplayStatus() {
+  const primary = screen.getPrimaryDisplay();
+  const displays = screen.getAllDisplays();
+  return {
+    selected: calendarDisplayPreference,
+    usingFallback: calendarDisplayPreference !== 'primary' && !displays.some(display => String(display.id) === calendarDisplayPreference),
+    options: displays.map((display, index) => {
+      const name = display.label || `显示器 ${index + 1}`;
+      const { width, height } = display.bounds ?? display.workArea;
+      const primaryLabel = display.id === primary.id ? '（当前主屏）' : '';
+      return { value: String(display.id), label: `${name} · ${width} × ${height}${primaryLabel}` };
+    }),
+  };
+}
+
+function pushCalendarDisplays() {
+  if (!mainWindow || mainWindow.isDestroyed() || mainWindow.webContents.isLoading()) return;
+  mainWindow.webContents.send('calendar:displays-changed', calendarDisplayStatus());
+}
+
+function recoverCalendarBounds(targetWorkArea) {
+  const current = mainWindow.getBounds();
+  const workArea = targetWorkArea ?? preferredCalendarDisplay().workArea;
+  const next = placeCalendar(current, workArea, Boolean(targetWorkArea));
+  if (next === current || (next.x === current.x && next.y === current.y
+    && next.width === current.width && next.height === current.height)) return;
+  adjustment = null;
+  const minWidth = Math.min(MIN_CALENDAR_WIDTH, next.width);
+  const minHeight = Math.min(MIN_CALENDAR_HEIGHT, next.height);
+  const [oldMinWidth, oldMinHeight] = mainWindow.getMinimumSize();
+  if (oldMinWidth !== minWidth || oldMinHeight !== minHeight) mainWindow.setMinimumSize(minWidth, minHeight);
+  mainWindow.setBounds(next, false);
+}
+
+function onDisplayLayoutChanged() {
+  clearTimeout(displayChangeTimer);
+  displayChangeTimer = setTimeout(() => {
+    if (!mainWindow || mainWindow.isDestroyed()) return;
+    if (calendarRequested && (mainWindow.isMinimized() || !mainWindow.isVisible())) {
+      presentWindow(false);
+    } else {
+      recoverCalendarBounds();
+      updateDesktopOrder();
+    }
+    pushCalendarDisplays();
+  }, 200);
+}
+
 function saveWindowBounds() {
   if (!mainWindow || mainWindow.isDestroyed()) return;
-  const { x, y, width, height } = mainWindow.getBounds();
-  fs.writeFile(windowBoundsPath(), JSON.stringify({ x, y, width, height }), 'utf8').catch(() => {});
+  const bounds = mainWindow.getNormalBounds();
+  const saved = JSON.stringify({ ...bounds, display: calendarDisplayPreference });
+  const file = windowBoundsPath();
+  windowBoundsWrites = windowBoundsWrites
+    .then(async () => {
+      await fs.writeFile(file + '.tmp', saved, 'utf8');
+      await fs.rename(file + '.tmp', file);
+    })
+    .catch(error => console.warn('Unable to save calendar window position:', error));
+  return windowBoundsWrites;
 }
 
 function updateDesktopOrder() {
@@ -92,10 +154,11 @@ function focusWindow(win = mainWindow) {
   return win.isFocused();
 }
 
-function presentWindow(focus = true) {
+function presentWindow(focus = true, targetWorkArea) {
   if (!mainWindow || mainWindow.isDestroyed()) return;
   calendarRequested = true;
   if (mainWindow.isMinimized()) mainWindow.restore();
+  recoverCalendarBounds(targetWorkArea);
   if (focus) {
     mainWindow.show();
     focusWindow();
@@ -111,6 +174,14 @@ function showWindow() {
   presentWindow(true);
 }
 
+function showCalendarOnCurrentDisplay() {
+  const display = screen.getDisplayNearestPoint(screen.getCursorScreenPoint());
+  calendarDisplayPreference = display.id === screen.getPrimaryDisplay().id ? 'primary' : String(display.id);
+  presentWindow(true, display.workArea);
+  saveWindowBounds();
+  pushCalendarDisplays();
+}
+
 function minimizeWindow() {
   adjustment = null;
   calendarRequested = false;
@@ -123,8 +194,9 @@ function minimizeWindow() {
 }
 
 function toggleWindow() {
-  if (!mainWindow) return;
-  if (!calendarRequested) showWindow();
+  if (!mainWindow || mainWindow.isDestroyed()) return;
+  if (!calendarRequested || !mainWindow.isVisible() || mainWindow.isMinimized()
+    || !calendarIsReachable(mainWindow.getBounds(), preferredCalendarDisplay().workArea)) showWindow();
   else minimizeWindow();
 }
 
@@ -572,6 +644,7 @@ function updateTrayMenu() {
   if (!tray) return;
   const menu = Menu.buildFromTemplate([
     { label: '显示 / 隐藏日历', click: toggleWindow },
+    { label: '将日历移到当前屏幕', click: showCalendarOnCurrentDisplay },
     { label: '新建日程', accelerator: 'Control+N', click: () => sendMenuAction('new-task') },
     { label: '新建便签', click: () => postMenuAction('note:new') },
     { type: 'separator' },
@@ -609,19 +682,15 @@ function createTray() {
 }
 
 function createWindow() {
-  const workArea = screen.getPrimaryDisplay().workArea;
-  const savedBounds = loadWindowBounds(workArea);
-  const width = savedBounds ? savedBounds.width : Math.min(1180, workArea.width - 64);
-  const height = savedBounds ? savedBounds.height : Math.min(760, workArea.height - 64);
+  const saved = loadWindowBounds();
+  const { workArea } = preferredCalendarDisplay();
+  const bounds = placeCalendar(saved, workArea);
 
   mainWindow = new BrowserWindow({
     minimizable: false,
-    width,
-    height,
-    minWidth: 760,
-    minHeight: 520,
-    x: savedBounds ? savedBounds.x : workArea.x + Math.floor((workArea.width - width) / 2),
-    y: savedBounds ? savedBounds.y : workArea.y + Math.floor((workArea.height - height) / 2),
+    ...bounds,
+    minWidth: Math.min(MIN_CALENDAR_WIDTH, bounds.width),
+    minHeight: Math.min(MIN_CALENDAR_HEIGHT, bounds.height),
     transparent: true,
     frame: false,
     icon: iconPath(),
@@ -695,6 +764,9 @@ if (!hasSingleInstanceLock) {
     await restoreSavedSettings();
     createWindow();
     createTray();
+    screen.on('display-added', onDisplayLayoutChanged);
+    screen.on('display-removed', onDisplayLayoutChanged);
+    screen.on('display-metrics-changed', onDisplayLayoutChanged);
     desktopOrderTimer = setInterval(updateDesktopOrder, 250);
     await applyIntegrationSettings();
     if (latestSettings.autoCheckUpdates) void checkForUpdatesInBackground();
@@ -711,6 +783,7 @@ if (!hasSingleInstanceLock) {
   app.on('will-quit', () => {
     globalShortcut.unregisterAll();
     clearInterval(desktopOrderTimer);
+    clearTimeout(displayChangeTimer);
     stopDesktopOrder();
     endNoteDrag();
     saveAllNoteBounds();
@@ -874,6 +947,19 @@ ipcMain.handle('calendar:focus-input', (event) => {
   updateDesktopOrder();
 });
 
+ipcMain.handle('calendar:get-displays', () => calendarDisplayStatus());
+ipcMain.handle('calendar:set-display', async (event, preference) => {
+  if (!mainWindow || mainWindow.isDestroyed() || event.sender !== mainWindow.webContents) return calendarDisplayStatus();
+  if (preference !== 'primary' && !screen.getAllDisplays().some(display => String(display.id) === preference)) {
+    return calendarDisplayStatus();
+  }
+  calendarDisplayPreference = preference;
+  recoverCalendarBounds(preferredCalendarDisplay().workArea);
+  updateDesktopOrder();
+  await saveWindowBounds();
+  return calendarDisplayStatus();
+});
+
 ipcMain.handle('window:adjust-mode', (_event, enabled) => {
   if (!mainWindow || mainWindow.isDestroyed()) return;
   adjustment = null;
@@ -930,6 +1016,13 @@ ipcMain.handle('window:adjust-update', () => {
 });
 
 ipcMain.handle('window:adjust-stop', () => {
+  if (adjustment?.mode === 'move' && mainWindow && !mainWindow.isDestroyed()) {
+    const display = screen.getDisplayMatching(mainWindow.getBounds());
+    if (display.id !== preferredCalendarDisplay().id) {
+      calendarDisplayPreference = display.id === screen.getPrimaryDisplay().id ? 'primary' : String(display.id);
+      pushCalendarDisplays();
+    }
+  }
   adjustment = null;
   saveWindowBounds();
 });
