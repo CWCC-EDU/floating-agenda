@@ -7,7 +7,7 @@ export type TextBackground = 'none' | 'soft' | 'solid';
 export type SoundEffect = 'none' | 'tick' | 'chime';
 export type FontFamily = 'Microsoft YaHei' | 'Segoe UI' | 'PingFang SC' | 'SimSun';
 export type EditorInputStyle = 'one-box' | 'multi-row';
-export type DesktopIconLayer = 'auto' | 'above' | 'below';
+export type DesktopIconLayer = 'above' | 'below';
 
 export interface Task {
   id: string;
@@ -29,6 +29,7 @@ export interface Task {
 export interface StickyNote {
   id: string;
   text: string;
+  richText?: string;
   completed: boolean;
   createdAt: string;
   open?: boolean;
@@ -144,6 +145,7 @@ export interface NutstoreSyncResult {
   message: string;
   state?: unknown;
   remote?: NutstoreRemoteSummary;
+  pullId?: string;
   status: NutstoreSyncStatus;
 }
 
@@ -171,6 +173,9 @@ export type NotesAppearance = Pick<
   | 'noteBulletStyle'
   | 'showNoteCheckbox'
 >;
+
+export type NotePatch = Partial<Pick<StickyNote, 'text' | 'richText' | 'completed'>>;
+export type NoteFormat = { type: 'checkbox' | 'strike' } | { type: 'color'; color: string };
 
 export interface NoteStatePayload {
   note: StickyNote;
@@ -210,9 +215,7 @@ export interface DesktopBridge {
   loadState: () => Promise<unknown>;
   saveState: (state: AppState) => Promise<void>;
   minimizeWindow: () => Promise<void>;
-  focusWindow: () => Promise<boolean>;
-  setInteractionActive: (active: boolean) => Promise<void>;
-  beginInput: () => Promise<boolean>;
+  focusCalendarInput: () => Promise<void>;
   setWindowAdjustmentMode: (enabled: boolean) => Promise<void>;
   startWindowAdjustment: (mode: WindowAdjustmentMode, resizeEdges?: WindowResizeEdge) => Promise<void>;
   updateWindowAdjustment: () => Promise<void>;
@@ -220,8 +223,10 @@ export interface DesktopBridge {
   quitApp: () => Promise<void>;
   checkForUpdates: () => Promise<UpdateCheckResult>;
   syncNotes: (payload: { notes: StickyNote[]; appearance: NotesAppearance }) => void;
-  noteReady: (id: string) => void;
-  sendNoteChange: (id: string, patch: Partial<Pick<StickyNote, 'text' | 'completed'>>) => void;
+  showNoteFormatMenu: (id: string, x: number, y: number, hasSelection: boolean) => void;
+  onNoteFormat: (callback: (format: NoteFormat) => void) => () => void;
+  noteReady: (id: string) => Promise<NoteStatePayload | null>;
+  sendNoteChange: (id: string, patch: NotePatch) => void;
   closeNote: (id: string) => void;
   deleteNote: (id: string) => void;
   newNote: () => void;
@@ -231,14 +236,15 @@ export interface DesktopBridge {
   onNotesOpenChanged: (callback: (id: string, open: boolean) => void) => () => void;
   onNotesDeleted: (callback: (id: string) => void) => () => void;
   onNotesCreate: (callback: () => void) => () => void;
-  startNoteDrag: (id: string) => void;
-  dragNoteWindow: (id: string) => void;
+  startNoteDrag: (id: string, x: number, y: number) => void;
+  moveNoteDrag: (id: string) => void;
   endNoteDrag: (id: string) => void;
   resizeNoteWindow: (id: string, height: number) => void;
   syncGetStatus: () => Promise<NutstoreSyncStatus>;
   syncConnect: (payload: { email: string; appPassword: string; autoSync: boolean }) => Promise<NutstoreConnectResult>;
   syncDisconnect: () => Promise<NutstoreConnectResult>;
   syncSetAutoSync: (enabled: boolean) => Promise<NutstoreAutoSyncResult>;
+  syncFinishPull: (id: string, state: AppState | null) => Promise<NutstoreSyncStatus>;
   syncNow: (state: AppState, options?: { manual?: boolean; strategy?: 'local' | 'remote' }) => Promise<NutstoreSyncResult>;
   onMenuAction: (callback: (action: DesktopMenuAction) => void) => () => void;
 }

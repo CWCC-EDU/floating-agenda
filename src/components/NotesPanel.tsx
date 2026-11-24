@@ -136,7 +136,7 @@ export function NotesPanel({ notes, settings, onChange, onClose }: NotesPanelPro
           <div className={`sticky-note ${note.completed ? 'is-completed' : ''}`} data-background={settings.noteTextBackground} key={note.id}>
             <span className="note-bullet">{settings.noteBulletStyle === 'number' ? `${index + 1}.` : settings.noteBulletStyle === 'dot' ? '•' : ''}</span>
             {settings.showNoteCheckbox && <input type="checkbox" aria-label={`完成便签 ${index + 1}`} checked={note.completed} onChange={(event) => updateNote(note.id, { completed: event.target.checked })} />}
-            <textarea aria-label={`便签 ${index + 1}`} value={note.text} placeholder="写点什么…" rows={3} onChange={(event) => updateNote(note.id, { text: event.target.value })} />
+            <textarea aria-label={`便签 ${index + 1}`} value={note.text} placeholder="写点什么…" rows={3} onChange={(event) => updateNote(note.id, { text: event.target.value, richText: undefined })} />
             <button className="note-delete" type="button" aria-label={`删除便签 ${index + 1}`} onClick={() => {
               if (window.confirm('删除这条便签？')) onChange(notes.filter((item) => item.id !== note.id));
             }}><Trash2 size={13} /></button>

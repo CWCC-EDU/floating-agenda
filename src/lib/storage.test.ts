@@ -52,7 +52,7 @@ describe('state normalization', () => {
     expect(legacy.settings.settingsRevision).toBe(3);
 
     const explicit = normalizeAppState({ settings: { desktopIconLayer: 'auto', settingsRevision: 2 } });
-    expect(explicit.settings.desktopIconLayer).toBe('auto');
+    expect(explicit.settings.desktopIconLayer).toBe('below');
 
     const above = normalizeAppState({ settings: { desktopIconLayer: 'above' } });
     expect(above.settings.desktopIconLayer).toBe('above');

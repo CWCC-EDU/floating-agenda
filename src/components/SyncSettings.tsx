@@ -4,7 +4,7 @@ import type { AppState, NutstoreRemoteSummary, NutstoreSyncResult, NutstoreSyncS
 
 interface SyncSettingsProps {
   appState: AppState;
-  onApplyRemote: (state: unknown) => void;
+  onApplyRemote: (result: NutstoreSyncResult, expected: AppState) => Promise<NutstoreSyncResult>;
 }
 
 function formatTime(value: string | null): string {
@@ -46,7 +46,6 @@ export function SyncSettings({ appState, onApplyRemote }: SyncSettingsProps) {
       return;
     }
     setConflict(null);
-    if (result.action === 'pulled' && result.state) onApplyRemote(result.state);
   }
 
   async function runSync(options: { manual?: boolean; strategy?: 'local' | 'remote' } = { manual: true }) {
@@ -55,7 +54,7 @@ export function SyncSettings({ appState, onApplyRemote }: SyncSettingsProps) {
     setMessage(options.strategy === 'local' ? '正在上传本机数据…' : options.strategy === 'remote' ? '正在下载云端数据…' : '正在同步…');
     setFailed(false);
     try {
-      showResult(await desktop.syncNow(appState, options));
+      showResult(await onApplyRemote(await desktop.syncNow(appState, options), appState));
     } catch {
       setMessage('同步失败，请稍后重试');
       setFailed(true);
@@ -78,7 +77,7 @@ export function SyncSettings({ appState, onApplyRemote }: SyncSettingsProps) {
         return;
       }
       setPassword('');
-      showResult(await desktop.syncNow(appState, { manual: true }));
+      showResult(await onApplyRemote(await desktop.syncNow(appState, { manual: true }), appState));
     } catch {
       setMessage('连接失败，请稍后重试');
       setFailed(true);
@@ -103,7 +102,8 @@ export function SyncSettings({ appState, onApplyRemote }: SyncSettingsProps) {
       const result = await desktop.syncDisconnect();
       setStatus(result.status);
       setMessage(result.message);
-      setFailed(false);
+      setFailed(!result.ok);
+      if (!result.ok) return;
       setConflict(null);
       setPassword('');
     } finally {
@@ -175,8 +175,8 @@ export function SyncSettings({ appState, onApplyRemote }: SyncSettingsProps) {
     <section className="setting-section">
       <h3>安全与备份</h3>
       <ul className="sync-security">
-        <li><ShieldCheck size={14} />账号与应用密码用 Windows 系统加密（DPAPI）保存在本机，只在连接坚果云时使用，不会写入日历数据，也不会显示在界面上。</li>
-        <li>同步数据保存在你自己的坚果云 <code>{status?.remoteLocation ?? 'floating-agenda/floating-agenda.json'}</code>。</li>
+        <li><ShieldCheck size={14} />账号与应用密码用 Windows 系统加密（DPAPI）保存在本机。连接时通过 HTTPS 发给坚果云，应用密码不写入日历文件。</li>
+        <li>日程、便签和设置保留在本机。开启同步后，也会以 JSON 存放在你的坚果云 <code>{status?.remoteLocation ?? 'floating-agenda/floating-agenda.json'}</code>。</li>
         <li>覆盖前会把旧版本备份到本机 <code>sync-backups</code> 文件夹，最多保留 20 份。</li>
         <li>其他电脑安装浮屿后，输入同一个坚果云账号和应用密码即可获取云端日历。</li>
       </ul>

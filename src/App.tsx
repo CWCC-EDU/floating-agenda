@@ -8,7 +8,7 @@ import { extendRecurringTasks, removeTaskSeries, rolloverTasks, sortTasks } from
 import { DEFAULT_SETTINGS, loadAppState, normalizeAppState, saveAppState } from './lib/storage';
 import { readableTextColor, taskFontSize } from './lib/appearance';
 import { playSound } from './lib/sound';
-import type { AppState, NotesAppearance, Settings, StickyNote, Task, TaskFilter, WindowAdjustmentMode, WindowResizeEdge } from './types';
+import type { AppState, NutstoreSyncResult, NotesAppearance, Settings, StickyNote, Task, TaskFilter, WindowAdjustmentMode, WindowResizeEdge } from './types';
 
 const WEEKDAYS = ['星期日', '星期一', '星期二', '星期三', '星期四', '星期五', '星期六'];
 const WINDOW_RESIZE_EDGES: WindowResizeEdge[] = ['n', 's', 'e', 'w', 'ne', 'nw', 'se', 'sw'];
@@ -28,7 +28,7 @@ export default function App() {
   const [state, setState] = useState<AppState>({ tasks: [], notes: [], settings: DEFAULT_SETTINGS });
   const [isReady, setIsReady] = useState(false);
   const [editor, setEditor] = useState<{ date: string; taskId?: string } | null>(null);
-  const [showSettings, setShowSettings] = useState(false);
+  const [showSettings, setShowSettings] = useState<boolean | 'notes'>(false);
   const [showWindowMenu, setShowWindowMenu] = useState(false);
   const [showContent, setShowContent] = useState(true);
   const [isAdjusting, setIsAdjusting] = useState(false);
@@ -40,43 +40,6 @@ export default function App() {
   const adjustmentPointer = useRef<number | null>(null);
   const notifiedTasks = useRef(new Set<string>());
   const isElectron = Boolean(window.desktop);
-
-  useEffect(() => {
-    if (!isElectron) return;
-    void window.desktop?.setInteractionActive(showSettings || Boolean(editor));
-  }, [editor, isElectron, showSettings]);
-
-  useEffect(() => {
-    if (!isElectron) return;
-    const onFocusIn = (event: FocusEvent) => {
-      const target = event.target as HTMLElement | null;
-      if (target?.closest('input, textarea, [contenteditable="true"]')) void window.desktop?.beginInput();
-    };
-    document.addEventListener('focusin', onFocusIn);
-    return () => document.removeEventListener('focusin', onFocusIn);
-  }, [isElectron]);
-
-  useEffect(() => {
-    if (!isElectron) return;
-    const requestFocus = (event: globalThis.PointerEvent) => {
-      const target = event.target as HTMLElement | null;
-      const editable = target?.closest<HTMLElement>('input, textarea, [contenteditable="true"]');
-      if (editable) {
-        editable.focus({ preventScroll: true });
-        if (editable.isContentEditable) {
-          const range = document.caretRangeFromPoint?.(event.clientX, event.clientY);
-          if (range && editable.contains(range.startContainer)) {
-            const selection = window.getSelection();
-            selection?.removeAllRanges();
-            selection?.addRange(range);
-          }
-        }
-      }
-      void window.desktop?.focusWindow();
-    };
-    window.addEventListener('pointerdown', requestFocus, true);
-    return () => window.removeEventListener('pointerdown', requestFocus, true);
-  }, [isElectron]);
 
   useEffect(() => {
     let active = true;
@@ -101,23 +64,35 @@ export default function App() {
     saveAppState(state).catch(() => setToast('保存失败，请检查本地存储权限'));
   }, [state, isReady]);
 
-  const applyRemoteState = useCallback((raw: unknown) => {
-    const normalized = normalizeAppState(raw);
+  const applyRemoteState = useCallback(async (result: NutstoreSyncResult, expected: AppState): Promise<NutstoreSyncResult> => {
+    const desktop = window.desktop;
+    if (!desktop || result.action !== 'pulled' || !result.state || !result.pullId) return result;
+
+    if (stateRef.current !== expected) {
+      const status = await desktop.syncFinishPull(result.pullId, null);
+      return { ...result, status, ok: false, action: 'conflict', message: '下载期间本机数据有改动，请选择保留哪一份' };
+    }
+
+    const normalized = normalizeAppState(result.state);
     const todayKey = toDateKey();
-    const result = rolloverTasks(normalized.tasks, todayKey, normalized.settings);
-    const extended = extendRecurringTasks(result.tasks, todayKey);
-    setState({ ...normalized, tasks: extended.tasks });
+    const rolled = rolloverTasks(normalized.tasks, todayKey, normalized.settings);
+    const extended = extendRecurringTasks(rolled.tasks, todayKey);
+    const next = { ...normalized, tasks: extended.tasks };
+    const persisted = desktop.syncFinishPull(result.pullId, next);
+    stateRef.current = next;
+    setState(next);
+    const status = await persisted;
     setToast('已从坚果云同步');
+    return { ...result, status };
   }, []);
 
   const syncSilently = useCallback(async () => {
     if (!window.desktop || syncBusy.current) return;
     syncBusy.current = true;
     try {
-      const result = await window.desktop.syncNow(stateRef.current, { manual: false });
-      if (result.action === 'pulled' && result.state) {
-        applyRemoteState(result.state);
-      } else if (result.action === 'conflict') {
+      const expected = stateRef.current;
+      const result = await applyRemoteState(await window.desktop.syncNow(expected, { manual: false }), expected);
+      if (result.action === 'conflict') {
         const key = result.remote?.savedAt ?? 'conflict';
         if (syncConflictNotice.current !== key) {
           syncConflictNotice.current = key;
@@ -144,6 +119,18 @@ export default function App() {
     }, 5 * 60 * 1000);
     return () => window.clearInterval(timer);
   }, [editor, isElectron, isReady, showSettings, syncSilently]);
+
+  const createNote = useCallback(() => {
+    const note = newStickyNote();
+    setShowWindowMenu(false);
+    setShowSettings(false);
+    window.desktop?.focusNote(note.id);
+    setState((current) => ({
+      ...current,
+      settings: { ...current.settings, showNotes: true },
+      notes: [...current.notes, note],
+    }));
+  }, []);
 
   const notesAppearance = useMemo<NotesAppearance>(() => ({
     backgroundColor: state.settings.backgroundColor,
@@ -189,20 +176,14 @@ export default function App() {
     const offDeleted = window.desktop?.onNotesDeleted((id) => {
       setState((current) => ({ ...current, notes: current.notes.filter((note) => note.id !== id) }));
     });
-    const offCreate = window.desktop?.onNotesCreate(() => {
-      setState((current) => ({
-        ...current,
-        settings: { ...current.settings, showNotes: true },
-        notes: [...current.notes, newStickyNote()],
-      }));
-    });
+    const offCreate = window.desktop?.onNotesCreate(createNote);
     return () => {
       offPatch?.();
       offOpen?.();
       offDeleted?.();
       offCreate?.();
     };
-  }, [isElectron]);
+  }, [createNote, isElectron]);
 
   useEffect(() => {
     if (!toast) return;
@@ -344,16 +325,6 @@ export default function App() {
     setMonthCursor(startOfMonth(today));
   }
 
-  function createNote() {
-    setShowWindowMenu(false);
-    setShowSettings(false);
-    setState((current) => ({
-      ...current,
-      settings: { ...current.settings, showNotes: true },
-      notes: [...current.notes, newStickyNote()],
-    }));
-  }
-
   function openNote(id: string) {
     setShowWindowMenu(false);
     setShowSettings(false);
@@ -363,6 +334,14 @@ export default function App() {
       notes: current.notes.map((note) => note.id === id ? { ...note, open: true } : note),
     }));
     void window.desktop?.focusNote(id);
+  }
+
+  function destroyNote(id: string) {
+    if (window.desktop) {
+      window.desktop.deleteNote(id);
+    } else {
+      setState((current) => ({ ...current, notes: current.notes.filter((note) => note.id !== id) }));
+    }
   }
 
   function toggleNoteOpen(id: string) {
@@ -545,17 +524,7 @@ export default function App() {
             <button type="button" role="menuitem" onClick={openSettingsFromMenu}><Palette size={15} /><span>主题皮肤</span></button>
             <div className="window-menu-notes">
               <button type="button" role="menuitem" onClick={createNote}><Plus size={15} /><span>新建便签</span></button>
-              {state.notes.length > 0 && (
-                <div className="window-menu-note-list">
-                  {[...state.notes].sort((a, b) => b.createdAt.localeCompare(a.createdAt)).map((note) => (
-                    <button type="button" role="menuitem" className={note.open ? 'is-open' : ''} key={note.id} title={note.text || '空白便签'} onClick={() => openNote(note.id)}>
-                      <StickyNoteIcon size={13} />
-                      <span>{(note.text.trim().split('\n')[0] || '空白便签').slice(0, 18)}</span>
-                      <em>{note.open ? '已打开' : '已关闭'}</em>
-                    </button>
-                  ))}
-                </div>
-              )}
+              <button type="button" role="menuitem" onClick={() => { setShowWindowMenu(false); setShowSettings('notes'); }}><StickyNoteIcon size={15} /><span>管理便签</span></button>
             </div>
             <button type="button" role="menuitem" className={isAdjusting ? 'is-active' : ''} disabled={!isElectron} onClick={toggleAdjustmentMode}><Move size={15} /><span>{isAdjusting ? '完成位置和大小调整' : '调整位置和大小'}</span>{isAdjusting && <Check size={14} />}</button>
             <button type="button" role="menuitem" disabled={!isElectron} onClick={() => { setShowWindowMenu(false); void window.desktop?.minimizeWindow(); }}><ChevronDown size={15} /><span>隐藏日历清单</span></button>
@@ -602,7 +571,7 @@ export default function App() {
 
                     <div className={`day-tasks ${rowCountForDay > state.settings.taskScrollThreshold ? 'is-scrollable' : ''}`} style={{ '--task-font-size': `${fontSize}px` } as CSSProperties}>
                       {dayTasks.map((task, taskIndex) => {
-                        const rolledOver = state.settings.rolloverEnabled && state.settings.rolloverHighlightEnabled && task.rolloverCount > 0;
+                        const rolledOver = state.settings.rolloverEnabled && state.settings.rolloverHighlightEnabled && !task.completed && task.rolloverCount > 0;
                         const taskColor = rolledOver ? state.settings.rolloverHighlightColor : task.color === 'default' ? defaultTaskColor : TASK_TEXT_COLORS[task.color];
                         return (
                           <div className={`calendar-task ${task.completed ? 'is-completed' : ''} ${rolledOver ? 'is-rolled-over' : ''}`} data-color={task.color} data-background={state.settings.taskTextBackground} data-rollover={rolledOver ? 'true' : undefined} style={{ '--task-item-color': taskColor } as CSSProperties} key={task.id}>
@@ -651,7 +620,7 @@ export default function App() {
 
         {!isReady && <div className="loading-cover"><span /><p>正在整理你的日历…</p></div>}
         {editor && <DayEditorDialog date={editor.date} tasks={tasksByDate.get(editor.date) ?? []} initialTaskId={editor.taskId} settings={state.settings} onAutoSave={(tasks) => saveDayTasks(editor.date, tasks, false)} onSave={(tasks) => saveDayTasks(editor.date, tasks)} onCancelSeries={cancelTaskSeries} onClose={() => setEditor(null)} />}
-        {showSettings && <SettingsDialog settings={state.settings} notes={state.notes} appState={state} isElectron={isElectron} onChange={updateSettings} onClose={() => setShowSettings(false)} onCreateNote={createNote} onOpenNote={openNote} onApplyRemote={applyRemoteState} />}
+        {showSettings && <SettingsDialog initialCategory={showSettings === 'notes' ? 'notes' : 'calendar'} settings={state.settings} notes={state.notes} appState={state} isElectron={isElectron} onChange={updateSettings} onClose={() => setShowSettings(false)} onCreateNote={createNote} onOpenNote={openNote} onDestroyNote={destroyNote} onApplyRemote={applyRemoteState} />}
         {toast && <div className="toast" role="status"><ListChecks size={16} />{toast}</div>}
       </section>
     </main>

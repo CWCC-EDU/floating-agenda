@@ -1,5 +1,5 @@
-const { app, BrowserWindow, globalShortcut, ipcMain, Menu, nativeImage, net, Notification, screen, session, Tray } = require('electron');
-const { spawn } = require('node:child_process');
+const { app, BrowserWindow, dialog, globalShortcut, ipcMain, Menu, nativeImage, net, Notification, screen, session, Tray } = require('electron');
+const { maintainDesktopOrder, moveNoteWindow, repairDesktopInput, stopDesktopOrder } = require('./desktop-order.cjs');
 const fs = require('node:fs/promises');
 const fsSync = require('node:fs');
 const path = require('node:path');
@@ -10,13 +10,13 @@ let tray = null;
 let currentFilter = 'all';
 let isQuitting = false;
 let latestSettings = {
+  desktopIconLayer: 'below',
   autoNumber: true,
   showWeekNumbers: true,
   showLunar: true,
   rolloverEnabled: true,
   autoStartEnabled: false,
   autoCheckUpdates: false,
-  desktopIconLayer: 'below',
   proxyEnabled: false,
   proxyServer: '',
   showHideShortcut: 'Control+Shift+Space',
@@ -25,14 +25,13 @@ let latestSettings = {
   completeTaskShortcut: '',
 };
 let adjustment = null;
-let interactionHold = false;
 let integrationSignature = '';
-let focusHelper = null;
-let helperBuffer = '';
-let contextMenuOpen = false;
-const foregroundWaiters = new Map();
-const liftStates = new Map();
-const desktopLayer = { raised: null, summon: false, timer: null, ticks: 0, styleThrough: null, styleBleed: null };
+let stateWrites = Promise.resolve();
+let desktopOrderTimer = null;
+let calendarRequested = false;
+let focusedNote = null;
+let noteToFocus = null;
+let contextMenuWindow = null;
 let notesSync = { notes: [], appearance: null };
 const noteWindows = new Map();
 const closingNoteIds = new Set();
@@ -71,549 +70,41 @@ function saveWindowBounds() {
   fs.writeFile(windowBoundsPath(), JSON.stringify({ x, y, width, height }), 'utf8').catch(() => {});
 }
 
-function putWindowAtDesktopBottom() {
-  if (process.platform !== 'win32' || !mainWindow || mainWindow.isDestroyed()) return;
-  const handle = mainWindow.getNativeWindowHandle().readBigUInt64LE(0).toString();
-  const command = `
-    Add-Type -TypeDefinition 'using System; using System.Runtime.InteropServices; public static class DesktopWindow {
-      [DllImport("user32.dll", SetLastError = true)]
-      public static extern bool SetWindowPos(IntPtr hWnd, IntPtr hWndInsertAfter, int X, int Y, int cx, int cy, uint uFlags);
-    }';
-    [DesktopWindow]::SetWindowPos([IntPtr]::new([int64]'${handle}'), [IntPtr]::new(1), 0, 0, 0, 0, 0x0013) | Out-Null
-  `;
-  const child = spawn('powershell.exe', [
-    '-NoProfile',
-    '-NonInteractive',
-    '-Command',
-    command,
-  ], { windowsHide: true });
-  let stderr = '';
-  child.stderr.on('data', (data) => { stderr += data.toString(); });
-  child.on('error', (error) => console.error('Unable to position desktop calendar:', error));
-  child.on('close', (code) => {
-    if (code !== 0) console.error('Desktop calendar positioning failed:', stderr || `exit ${code}`);
-  });
-}
+function updateDesktopOrder() {
+  if (process.platform !== 'win32') return;
 
-let attachLogged = false;
-function logDesktop(message) {
-  try {
-    fs.appendFile(path.join(app.getPath('userData'), 'desktop.log'), `${new Date().toISOString()} ${message}\n`, 'utf8').catch(() => {});
-  } catch {
-    // logging is best-effort
+  const calendar = calendarRequested && mainWindow && !mainWindow.isDestroyed() ? mainWindow : null;
+  const windows = [...noteWindows.values()].filter((win) =>
+    !win.isDestroyed() && win.isVisible() && !win.isMinimized());
+  const topNote = contextMenuWindow === mainWindow ? focusedNote : (contextMenuWindow ?? focusedNote);
+  if (topNote && windows.includes(topNote)) {
+    windows.splice(windows.indexOf(topNote), 1);
+    windows.unshift(topNote);
   }
+  if (calendar) windows.push(calendar);
+  maintainDesktopOrder(calendar, latestSettings.desktopIconLayer === 'above', windows);
 }
 
-function attachToDesktop(forceShow = false, win = mainWindow) {
-  if (process.platform !== 'win32' || !win || win.isDestroyed()) return;
-  const isMain = win === mainWindow;
-  const handle = win.getNativeWindowHandle().readBigUInt64LE(0).toString();
-  const placeAboveIcons = desktopLayer.raised !== false;
-  const wantVisible = forceShow || win.isVisible();
-  const command = `
-    Add-Type -TypeDefinition 'using System; using System.Runtime.InteropServices; using System.Text; public static class DesktopHost {
-      [DllImport("user32.dll", SetLastError = true, CharSet = CharSet.Unicode)]
-      public static extern IntPtr FindWindow(string lpClassName, string lpWindowName);
-      [DllImport("user32.dll", SetLastError = true, CharSet = CharSet.Unicode)]
-      public static extern IntPtr FindWindowEx(IntPtr parent, IntPtr after, string cls, string win);
-      [DllImport("user32.dll", SetLastError = true)]
-      public static extern IntPtr SetParent(IntPtr hWndChild, IntPtr hWndNewParent);
-      [DllImport("user32.dll", SetLastError = true)]
-      public static extern bool SetWindowPos(IntPtr hWnd, IntPtr hWndInsertAfter, int X, int Y, int cx, int cy, uint uFlags);
-      [DllImport("user32.dll", SetLastError = true)]
-      public static extern IntPtr GetParent(IntPtr hWnd);
-      [DllImport("user32.dll", SetLastError = true, CharSet = CharSet.Unicode)]
-      public static extern int GetClassName(IntPtr hWnd, StringBuilder lpClassName, int nMaxCount);
-      [DllImport("user32.dll", SetLastError = true)]
-      public static extern IntPtr GetWindowLongPtr(IntPtr hWnd, int nIndex);
-      [DllImport("user32.dll", SetLastError = true)]
-      public static extern IntPtr SetWindowLongPtr(IntPtr hWnd, int nIndex, IntPtr dwNewLong);
-      [DllImport("user32.dll")] public static extern bool ShowWindow(IntPtr hWnd, int nCmdShow);
-      [DllImport("user32.dll")] public static extern bool IsWindowVisible(IntPtr hWnd);
-      public delegate bool EnumWindowsProc(IntPtr hWnd, IntPtr lParam);
-      [DllImport("user32.dll")] public static extern bool EnumWindows(EnumWindowsProc lpEnumFunc, IntPtr lParam);
-      public static IntPtr FindDesktopDefView() {
-        IntPtr progman = FindWindow("Progman", null);
-        if (progman != IntPtr.Zero) {
-          IntPtr direct = FindWindowEx(progman, IntPtr.Zero, "SHELLDLL_DefView", null);
-          if (direct != IntPtr.Zero) return direct;
-        }
-        IntPtr found = IntPtr.Zero;
-        EnumWindows(delegate(IntPtr h, IntPtr l) {
-          IntPtr d = FindWindowEx(h, IntPtr.Zero, "SHELLDLL_DefView", null);
-          if (d != IntPtr.Zero) { found = d; return false; }
-          return true;
-        }, IntPtr.Zero);
-        return found;
-      }
-    }';
-    $cal = [IntPtr]::new([int64]'${handle}');
-    $progman = [DesktopHost]::FindWindow('Progman', [NullString]::Value);
-    if ($progman -eq [IntPtr]::Zero) { Write-Output 'NO_PROGMAN'; exit 0 }
-    $defView = [DesktopHost]::FindDesktopDefView();
-    $hostWnd = $progman;
-    if ($defView -ne [IntPtr]::Zero) {
-      $defParent = [DesktopHost]::GetParent($defView);
-      if ($defParent -ne [IntPtr]::Zero) { $hostWnd = $defParent }
-    }
-    $currentParent = [DesktopHost]::GetParent($cal);
-    $parentChanged = $currentParent -ne $hostWnd;
-    if ($parentChanged) {
-      if ($currentParent -ne [IntPtr]::Zero) { [DesktopHost]::SetParent($cal, [IntPtr]::Zero) | Out-Null }
-      [DesktopHost]::SetParent($cal, $hostWnd) | Out-Null;
-    }
-    $style = [DesktopHost]::GetWindowLongPtr($cal, -16).ToInt64();
-    $nextStyle = ($style -band (-bnot 0x80000000)) -bor 0x40000000;
-    $styleChanged = $nextStyle -ne $style;
-    if ($styleChanged) {
-      [DesktopHost]::SetWindowLongPtr($cal, -16, [IntPtr]::new($nextStyle)) | Out-Null;
-    }
-    $placeAbove = $${placeAboveIcons ? 'true' : 'false'};
-    $flags = 0x0013;
-    if ($parentChanged -or $styleChanged) { $flags = $flags -bor 0x0020 }
-    if ($placeAbove -or $defView -eq [IntPtr]::Zero) {
-      [DesktopHost]::SetWindowPos($cal, [IntPtr]::new(0), 0, 0, 0, 0, $flags) | Out-Null;
-    } else {
-      [DesktopHost]::SetWindowPos($cal, $defView, 0, 0, 0, 0, $flags) | Out-Null;
-    }
-    if ($${wantVisible ? 'true' : 'false'}) {
-      [DesktopHost]::ShowWindow($cal, 8) | Out-Null;
-    }
-    $parentBuf = [Text.StringBuilder]::new(256);
-    $hostBuf = [Text.StringBuilder]::new(256);
-    $nowParent = [DesktopHost]::GetParent($cal);
-    if ($nowParent -ne [IntPtr]::Zero) { [DesktopHost]::GetClassName($nowParent, $parentBuf, 256) | Out-Null }
-    [DesktopHost]::GetClassName($hostWnd, $hostBuf, 256) | Out-Null;
-    $visible = [DesktopHost]::IsWindowVisible($cal);
-    Write-Output ('ATTACHED:' + $visible + ':' + $parentBuf.ToString() + ':' + $hostBuf.ToString())
-  `;
-  const child = spawn('powershell.exe', [
-    '-NoProfile',
-    '-NonInteractive',
-    '-Command',
-    command,
-  ], { windowsHide: true });
-  let stdout = '';
-  let stderr = '';
-  child.stdout.on('data', (data) => { stdout += data.toString(); });
-  child.stderr.on('data', (data) => { stderr += data.toString(); });
-  child.on('error', (error) => console.error('Unable to attach window to desktop:', error));
-  child.on('close', (code) => {
-    const ok = code === 0 && stdout.includes('ATTACHED');
-    if (isMain && !attachLogged) {
-      attachLogged = true;
-      logDesktop(`${ok ? 'attach' : 'attach-failed'} mode=${latestSettings.desktopIconLayer} wantVisible=${wantVisible} code=${code} out=${stdout.trim()} err=${stderr.trim()}`);
-    }
-    if (!ok) {
-      console.error('Desktop attachment failed:', stderr || stdout || `exit ${code}`);
-      if (isMain) putWindowAtDesktopBottom();
-    }
-  });
-}
-
-const FOCUS_HELPER_SCRIPT = `
-  Add-Type -TypeDefinition 'using System; using System.Runtime.InteropServices; using System.Text; public static class FocusGrant {
-    [DllImport("user32.dll")] public static extern IntPtr GetForegroundWindow();
-    [DllImport("user32.dll")] public static extern uint GetWindowThreadProcessId(IntPtr hWnd, out uint pid);
-    [DllImport("kernel32.dll")] public static extern uint GetCurrentThreadId();
-    [DllImport("user32.dll")] public static extern bool AttachThreadInput(uint attach, uint attachTo, bool doAttach);
-    [DllImport("user32.dll")] public static extern IntPtr SetFocus(IntPtr hWnd);
-    [DllImport("user32.dll", SetLastError = true, CharSet = CharSet.Unicode)] public static extern IntPtr FindWindow(string lpClassName, string lpWindowName);
-    [DllImport("user32.dll", SetLastError = true)] public static extern IntPtr GetWindow(IntPtr hWnd, uint uCmd);
-    [DllImport("user32.dll", CharSet = CharSet.Unicode)] public static extern int GetClassName(IntPtr hWnd, StringBuilder lpClassName, int nMaxCount);
-    [DllImport("user32.dll", SetLastError = true)] public static extern bool SetWindowPos(IntPtr hWnd, IntPtr hWndInsertAfter, int X, int Y, int cx, int cy, uint uFlags);
-    [DllImport("user32.dll")] public static extern IntPtr FindWindowEx(IntPtr parent, IntPtr after, string cls, string win);
-    [DllImport("user32.dll")] public static extern IntPtr GetWindowLongPtr(IntPtr hWnd, int nIndex);
-    [DllImport("user32.dll")] public static extern IntPtr SetWindowLongPtr(IntPtr hWnd, int nIndex, IntPtr dwNewLong);
-    [DllImport("user32.dll")] public static extern bool RedrawWindow(IntPtr hWnd, IntPtr lprcUpdate, IntPtr hrgnUpdate, uint flags);
-    [DllImport("user32.dll")] public static extern bool ShowWindow(IntPtr hWnd, int nCmdShow);
-    [DllImport("user32.dll", SetLastError = true)] public static extern IntPtr SetParent(IntPtr hWndChild, IntPtr hWndNewParent);
-    [DllImport("user32.dll", SetLastError = true)] public static extern IntPtr GetParent(IntPtr hWnd);
-    [DllImport("user32.dll")] public static extern bool GetWindowRect(IntPtr hWnd, out RECT lpRect);
-    [DllImport("user32.dll")] public static extern bool SetForegroundWindow(IntPtr hWnd);
-    [DllImport("user32.dll")] public static extern bool BringWindowToTop(IntPtr hWnd);
-    [StructLayout(LayoutKind.Sequential)] public struct RECT { public int Left; public int Top; public int Right; public int Bottom; }
-    public delegate bool EnumWindowsProc(IntPtr hWnd, IntPtr lParam);
-    [DllImport("user32.dll")] public static extern bool EnumWindows(EnumWindowsProc lpEnumFunc, IntPtr lParam);
-    public static IntPtr FindDesktopDefView() {
-      IntPtr progman = FindWindow("Progman", null);
-      if (progman != IntPtr.Zero) {
-        IntPtr direct = FindWindowEx(progman, IntPtr.Zero, "SHELLDLL_DefView", null);
-        if (direct != IntPtr.Zero) return direct;
-      }
-      IntPtr found = IntPtr.Zero;
-      EnumWindows(delegate(IntPtr h, IntPtr l) {
-        IntPtr d = FindWindowEx(h, IntPtr.Zero, "SHELLDLL_DefView", null);
-        if (d != IntPtr.Zero) { found = d; return false; }
-        return true;
-      }, IntPtr.Zero);
-      return found;
-    }
-  }';
-  function Get-DesktopDefView {
-    return [FocusGrant]::FindDesktopDefView()
-  }
-  function Get-DesktopIconWindows {
-    $defView = Get-DesktopDefView;
-    if ($defView -eq [IntPtr]::Zero) { return @() }
-    $listView = [FocusGrant]::FindWindowEx($defView, [IntPtr]::Zero, 'SysListView32', [NullString]::Value);
-    return @($defView, $listView) | Where-Object { $_ -ne [IntPtr]::Zero }
-  }
-  function Set-DesktopIconStyles([bool]$wantThrough, [bool]$wantBleed) {
-    foreach ($h in (Get-DesktopIconWindows)) {
-      $exStyle = [FocusGrant]::GetWindowLongPtr($h, -20).ToInt64();
-      $nextEx = if ($wantThrough) { $exStyle -bor 0x20 } else { $exStyle -band (-bnot 0x20) };
-      if ($nextEx -ne $exStyle) {
-        [FocusGrant]::SetWindowLongPtr($h, -20, [IntPtr]$nextEx) | Out-Null;
-        [FocusGrant]::RedrawWindow($h, [IntPtr]::Zero, [IntPtr]::Zero, 0x185) | Out-Null;
-      }
-      $style = [FocusGrant]::GetWindowLongPtr($h, -16).ToInt64();
-      $nextStyle = if ($wantBleed) { $style -band (-bnot 0x04000000) } else { $style -bor 0x04000000 };
-      if ($nextStyle -ne $style) {
-        [FocusGrant]::SetWindowLongPtr($h, -16, [IntPtr]$nextStyle) | Out-Null;
-        [FocusGrant]::RedrawWindow($h, [IntPtr]::Zero, [IntPtr]::Zero, 0x185) | Out-Null;
-      }
-    }
-  }
-  while ($true) {
-    $line = [Console]::In.ReadLine();
-    if ($null -eq $line) { break }
-    $line = $line.Trim();
-    if ($line -eq 'quit') { break }
-    try {
-      if ($line.StartsWith('focus:')) {
-        $target = [IntPtr]::new([int64]$line.Substring(6));
-        $current = [FocusGrant]::GetCurrentThreadId();
-        $foreground = [FocusGrant]::GetForegroundWindow();
-        $fgPid = 0;
-        $fgThread = 0;
-        if ($foreground -ne [IntPtr]::Zero) { $fgThread = [FocusGrant]::GetWindowThreadProcessId($foreground, [ref]$fgPid) }
-        $targetPid = 0;
-        $targetThread = [FocusGrant]::GetWindowThreadProcessId($target, [ref]$targetPid);
-        if ($fgThread -ne 0 -and $fgThread -ne $current) { [FocusGrant]::AttachThreadInput($current, $fgThread, $true) | Out-Null }
-        if ($targetThread -ne $current -and $targetThread -ne $fgThread) { [FocusGrant]::AttachThreadInput($current, $targetThread, $true) | Out-Null }
-        [FocusGrant]::SetFocus($target) | Out-Null
-        if ($targetThread -ne $current -and $targetThread -ne $fgThread) { [FocusGrant]::AttachThreadInput($current, $targetThread, $false) | Out-Null }
-        if ($fgThread -ne 0 -and $fgThread -ne $current) { [FocusGrant]::AttachThreadInput($current, $fgThread, $false) | Out-Null }
-        Write-Output 'ok'
-      } elseif ($line.StartsWith('fg:')) {
-        $target = [IntPtr]::new([int64]$line.Substring(3));
-        $flag = if ([FocusGrant]::GetForegroundWindow() -eq $target) { '1' } else { '0' }
-        Write-Output ('fg:' + $target.ToString() + ':' + $flag)
-      } elseif ($line.StartsWith('detach:')) {
-        $target = [IntPtr]::new([int64]$line.Substring(7));
-        $parent = [FocusGrant]::GetParent($target);
-        if ($parent -ne [IntPtr]::Zero) {
-          $rect = New-Object FocusGrant+RECT;
-          [FocusGrant]::GetWindowRect($target, [ref]$rect) | Out-Null;
-          [FocusGrant]::SetParent($target, [IntPtr]::Zero) | Out-Null;
-          $style = [FocusGrant]::GetWindowLongPtr($target, -16).ToInt64();
-          $nextStyle = ($style -band (-bnot 0x40000000)) -bor 0x80000000;
-          [FocusGrant]::SetWindowLongPtr($target, -16, [IntPtr]::new($nextStyle)) | Out-Null;
-          [FocusGrant]::ShowWindow($target, 5) | Out-Null;
-          [FocusGrant]::SetWindowPos($target, [IntPtr]::Zero, $rect.Left, $rect.Top, ($rect.Right - $rect.Left), ($rect.Bottom - $rect.Top), 0x0030) | Out-Null;
-        }
-        $current = [FocusGrant]::GetCurrentThreadId();
-        $foreground = [FocusGrant]::GetForegroundWindow();
-        $fgPid = 0;
-        $fgThread = 0;
-        if ($foreground -ne [IntPtr]::Zero) { $fgThread = [FocusGrant]::GetWindowThreadProcessId($foreground, [ref]$fgPid) }
-        $targetPid = 0;
-        $targetThread = [FocusGrant]::GetWindowThreadProcessId($target, [ref]$targetPid);
-        if ($fgThread -ne 0 -and $fgThread -ne $current) { [FocusGrant]::AttachThreadInput($current, $fgThread, $true) | Out-Null }
-        if ($targetThread -ne $current -and $targetThread -ne $fgThread) { [FocusGrant]::AttachThreadInput($current, $targetThread, $true) | Out-Null }
-        [FocusGrant]::SetForegroundWindow($target) | Out-Null;
-        [FocusGrant]::BringWindowToTop($target) | Out-Null;
-        [FocusGrant]::SetFocus($target) | Out-Null;
-        if ($targetThread -ne $current -and $targetThread -ne $fgThread) { [FocusGrant]::AttachThreadInput($current, $targetThread, $false) | Out-Null }
-        if ($fgThread -ne 0 -and $fgThread -ne $current) { [FocusGrant]::AttachThreadInput($current, $fgThread, $false) | Out-Null }
-        Write-Output ('detached:' + ([FocusGrant]::GetForegroundWindow() -eq $target))
-      } elseif ($line.StartsWith('raise:')) {
-        $target = [IntPtr]::new([int64]$line.Substring(6));
-        [FocusGrant]::SetWindowPos($target, [IntPtr]::Zero, 0, 0, 0, 0, 0x0013) | Out-Null
-        Write-Output 'ok'
-      } elseif ($line.StartsWith('lower:')) {
-        $target = [IntPtr]::new([int64]$line.Substring(6));
-        $defView = Get-DesktopDefView;
-        if ($defView -eq [IntPtr]::Zero) { Write-Output 'nodefview' } else {
-          [FocusGrant]::SetWindowPos($target, $defView, 0, 0, 0, 0, 0x0013) | Out-Null
-          Write-Output 'ok'
-        }
-      } elseif ($line.StartsWith('styles:')) {
-        $parts = $line.Substring(7).Split(':');
-        Set-DesktopIconStyles ($parts[0] -eq '1') ($parts.Length -gt 1 -and $parts[1] -eq '1');
-        Write-Output 'ok'
-      } elseif ($line.StartsWith('hide:')) {
-        $target = [IntPtr]::new([int64]$line.Substring(5));
-        [FocusGrant]::ShowWindow($target, 0) | Out-Null
-        Write-Output 'ok'
-      }
-    } catch {
-      Write-Output ('err:' + $_.Exception.Message)
-    }
-  }
-  try { Set-DesktopIconStyles $false $false } catch {}
-`;
-
-function ensureFocusHelper() {
-  if (process.platform !== 'win32') return null;
-  if (focusHelper && focusHelper.exitCode === null && !focusHelper.killed) return focusHelper;
-  const child = spawn('powershell.exe', [
-    '-NoProfile',
-    '-NonInteractive',
-    '-Command',
-    FOCUS_HELPER_SCRIPT,
-  ], { windowsHide: true });
-  let stderr = '';
-  child.stdin.on('error', () => {});
-  child.stdout.on('data', (data) => {
-    helperBuffer += data.toString();
-    let index;
-    while ((index = helperBuffer.indexOf('\n')) >= 0) {
-      const line = helperBuffer.slice(0, index).trim();
-      helperBuffer = helperBuffer.slice(index + 1);
-      if (line.startsWith('fg:')) {
-        const [, handle, flag] = line.split(':');
-        const waiter = foregroundWaiters.get(handle);
-        if (waiter) {
-          foregroundWaiters.delete(handle);
-          waiter(flag === '1');
-        }
-      } else if (line.startsWith('err:')) {
-        logDesktop(`focus helper error ${line.slice(4)}`);
-      }
-    }
-  });
-  child.stderr.on('data', (data) => { stderr += data.toString(); });
-  child.on('error', (error) => console.error('Unable to start focus helper:', error));
-  child.on('close', (code) => {
-    if (code !== 0 && code !== null && stderr) console.error('Focus helper stopped:', stderr);
-    if (focusHelper === child) focusHelper = null;
-  });
-  focusHelper = child;
-  return child;
-}
-
-function grantOsFocus(win = mainWindow) {
-  if (process.platform !== 'win32' || !win || win.isDestroyed()) return;
-  const helper = ensureFocusHelper();
-  if (!helper || helper.stdin.destroyed) return;
-  const handle = win.getNativeWindowHandle().readBigUInt64LE(0).toString();
-  try {
-    helper.stdin.write(`focus:${handle}\n`);
-  } catch {
-    focusHelper = null;
-  }
-}
-
-function sendDesktopCommand(command, win = mainWindow) {
-  if (process.platform !== 'win32' || !win || win.isDestroyed()) return;
-  const helper = ensureFocusHelper();
-  if (!helper || helper.stdin.destroyed) return;
-  const handle = win.getNativeWindowHandle().readBigUInt64LE(0).toString();
-  try {
-    helper.stdin.write(`${command}:${handle}\n`);
-  } catch {
-    focusHelper = null;
-  }
-}
-
-function getLiftState(win) {
-  if (!win) return null;
-  let state = liftStates.get(win.id);
-  if (!state) {
-    state = { detached: false, at: 0, watch: null, probe: false };
-    liftStates.set(win.id, state);
-  }
-  return state;
-}
-
-// IME composition needs a real foreground top-level window; a WS_CHILD parented to
-// Progman never receives an input context, so lift the window out of the desktop
-// while the user is typing and embed it again once another window takes focus.
-function isWindowForeground(win) {
-  return new Promise((resolve) => {
-    if (process.platform !== 'win32' || !win || win.isDestroyed()) {
-      resolve(true);
-      return;
-    }
-    const helper = ensureFocusHelper();
-    if (!helper || helper.stdin.destroyed) {
-      resolve(true);
-      return;
-    }
-    const handle = win.getNativeWindowHandle().readBigUInt64LE(0).toString();
-    const previous = foregroundWaiters.get(handle);
-    if (previous) {
-      foregroundWaiters.delete(handle);
-      previous(true);
-    }
-    let settled = false;
-    const finish = (value) => {
-      if (settled) return;
-      settled = true;
-      if (foregroundWaiters.get(handle) === finish) foregroundWaiters.delete(handle);
-      resolve(value);
-    };
-    foregroundWaiters.set(handle, finish);
-    try {
-      helper.stdin.write(`fg:${handle}\n`);
-    } catch {
-      focusHelper = null;
-      finish(true);
-      return;
-    }
-    setTimeout(() => finish(true), 900);
-  });
-}
-
-function stopDetachedWatch(win) {
-  const state = win ? getLiftState(win) : null;
-  if (state?.watch) clearInterval(state.watch);
-  if (state) state.watch = null;
-}
-
-function startDetachedWatch(win) {
-  const state = getLiftState(win);
-  if (!state || state.watch) return;
-  state.watch = setInterval(async () => {
-    if (!state.detached || !win || win.isDestroyed()) {
-      stopDetachedWatch(win);
-      return;
-    }
-    if (state.probe || contextMenuOpen || Date.now() - state.at < 1200) return;
-    state.probe = true;
-    const foreground = await isWindowForeground(win);
-    state.probe = false;
-    if (foreground || !state.detached || win.isDestroyed()) return;
-    state.detached = false;
-    stopDetachedWatch(win);
-    logDesktop(`reattach after focus loss win=${win.id}`);
-    attachToDesktop(win.isVisible(), win);
-    if (win === mainWindow) updateDesktopLayer();
-  }, 800);
-}
-
-function liftWindowForInput(win = mainWindow) {
-  if (process.platform !== 'win32' || !win || win.isDestroyed()) return false;
-  const state = getLiftState(win);
-  if (!state.detached) {
-    state.detached = true;
-    state.at = Date.now();
-    const helper = ensureFocusHelper();
-    const handle = win.getNativeWindowHandle().readBigUInt64LE(0).toString();
-    if (helper && !helper.stdin.destroyed) {
-      try {
-        helper.stdin.write(`detach:${handle}\n`);
-      } catch {
-        focusHelper = null;
-      }
-    }
-    logDesktop(`lift for input hwnd=${handle} win=${win.id}`);
-  }
-  startDetachedWatch(win);
-  if (!win.isVisible()) win.show();
+function focusWindow(win = mainWindow) {
+  if (!win || win.isDestroyed()) return false;
   win.focus();
   win.webContents.focus();
-  grantOsFocus(win);
-  return state.detached;
-}
-
-function desktopWindows() {
-  const windows = [];
-  if (mainWindow && !mainWindow.isDestroyed()) windows.push(mainWindow);
-  noteWindows.forEach((win) => {
-    if (win && !win.isDestroyed()) windows.push(win);
-  });
-  return windows;
-}
-
-function setDesktopLayer(raised) {
-  if (desktopLayer.raised === raised) return;
-  desktopLayer.raised = raised;
-  desktopWindows().forEach((win) => {
-    if (win.isVisible()) sendDesktopCommand(raised ? 'raise' : 'lower', win);
-  });
-}
-
-function setDesktopStyles(through, bleed, force = false) {
-  if (!force && desktopLayer.styleThrough === through && desktopLayer.styleBleed === bleed) return;
-  desktopLayer.styleThrough = through;
-  desktopLayer.styleBleed = bleed;
-  if (process.platform !== 'win32') return;
-  const helper = ensureFocusHelper();
-  if (!helper || helper.stdin.destroyed) {
-    desktopLayer.styleThrough = null;
-    desktopLayer.styleBleed = null;
-    return;
-  }
-  try {
-    helper.stdin.write(`styles:${through ? 1 : 0}:${bleed ? 1 : 0}\n`);
-  } catch {
-    focusHelper = null;
-    desktopLayer.styleThrough = null;
-    desktopLayer.styleBleed = null;
-  }
-}
-
-function updateDesktopLayer() {
-  if (!mainWindow || mainWindow.isDestroyed() || !mainWindow.isVisible()) {
-    setDesktopStyles(false, false);
-    return;
-  }
-  if (getLiftState(mainWindow)?.detached || desktopWindows().some((win) => getLiftState(win)?.detached)) {
-    setDesktopStyles(false, false);
-    return;
-  }
-  desktopLayer.ticks = (desktopLayer.ticks + 1) % 50;
-  const force = desktopLayer.ticks === 0;
-  const point = screen.getCursorScreenPoint();
-  const containsPoint = (win) => {
-    if (!win || win.isDestroyed() || !win.isVisible()) return false;
-    const bounds = win.getBounds();
-    return point.x >= bounds.x && point.x < bounds.x + bounds.width && point.y >= bounds.y && point.y < bounds.y + bounds.height;
-  };
-  const inside = desktopWindows().some(containsPoint);
-  if (latestSettings.desktopIconLayer === 'above') {
-    desktopLayer.summon = false;
-    setDesktopLayer(interactionHold);
-    setDesktopStyles(!interactionHold && inside, false, force);
-    return;
-  }
-  if (latestSettings.desktopIconLayer === 'below') {
-    setDesktopLayer(true);
-    setDesktopStyles(false, true, force);
-    return;
-  }
-  setDesktopStyles(false, false, force);
-  if (inside) desktopLayer.summon = false;
-  setDesktopLayer(Boolean(adjustment) || desktopLayer.summon || inside);
-}
-
-function startDesktopLayerWatch() {
-  if (process.platform !== 'win32' || desktopLayer.timer) return;
-  desktopLayer.timer = setInterval(updateDesktopLayer, 60);
+  return win.isFocused();
 }
 
 function presentWindow(focus = true) {
-  if (!mainWindow) return;
-  const state = getLiftState(mainWindow);
-  state.detached = false;
-  stopDetachedWatch(mainWindow);
+  if (!mainWindow || mainWindow.isDestroyed()) return;
+  calendarRequested = true;
   if (mainWindow.isMinimized()) mainWindow.restore();
-  if (focus) mainWindow.show();
-  else mainWindow.showInactive();
-  desktopLayer.summon = true;
-  desktopLayer.raised = latestSettings.desktopIconLayer === 'above' ? false : latestSettings.desktopIconLayer === 'below' ? true : null;
-  if (focus && !isQuitting) {
-    mainWindow.focus();
-    mainWindow.webContents.focus();
-    grantOsFocus();
+  if (focus) {
+    mainWindow.show();
+    focusWindow();
+  } else {
+    mainWindow.showInactive();
   }
-  attachToDesktop(true);
-  updateDesktopLayer();
   notesSuppressed = false;
   showOpenNoteWindows();
+  updateDesktopOrder();
 }
 
 function showWindow() {
@@ -622,22 +113,18 @@ function showWindow() {
 
 function minimizeWindow() {
   adjustment = null;
-  desktopLayer.summon = false;
-  const state = getLiftState(mainWindow);
-  state.detached = false;
-  stopDetachedWatch(mainWindow);
-  setDesktopStyles(false, false);
+  calendarRequested = false;
   mainWindow?.setResizable(false);
   mainWindow?.hide();
-  sendDesktopCommand('hide');
   notesSuppressed = true;
+  noteToFocus = null;
   hideAllNoteWindows();
+  updateDesktopOrder();
 }
 
 function toggleWindow() {
   if (!mainWindow) return;
-  const focused = mainWindow.isFocused() || mainWindow.webContents.isFocused();
-  if (mainWindow.isMinimized() || !mainWindow.isVisible() || !focused) showWindow();
+  if (!calendarRequested) showWindow();
   else minimizeWindow();
 }
 
@@ -750,8 +237,14 @@ function showNoteWindow(id) {
   const note = noteById(id);
   if (!win || win.isDestroyed() || !note || note.open !== true || notesSuppressed) return;
   if (win.webContents.isLoading()) return;
-  if (!win.isVisible()) win.showInactive();
-  attachToDesktop(true, win);
+  if (noteToFocus === id) {
+    noteToFocus = null;
+    win.show();
+    focusWindow(win);
+  } else if (!win.isVisible()) {
+    win.showInactive();
+  }
+  updateDesktopOrder();
 }
 
 function showOpenNoteWindows() {
@@ -761,14 +254,8 @@ function showOpenNoteWindows() {
 function hideNoteWindow(id) {
   const win = noteWindows.get(id);
   if (!win || win.isDestroyed()) return;
-  const state = getLiftState(win);
-  state.detached = false;
-  stopDetachedWatch(win);
   saveNoteBounds(id, win);
-  if (win.isVisible()) {
-    sendDesktopCommand('hide', win);
-    win.hide();
-  }
+  win.hide();
 }
 
 function hideAllNoteWindows() {
@@ -776,15 +263,12 @@ function hideAllNoteWindows() {
 }
 
 function destroyNoteWindow(id) {
-  if (noteDrag && noteDrag.id === id) endNoteDrag();
   const win = noteWindows.get(id);
   if (!win || win.isDestroyed()) {
     noteWindows.delete(id);
     return;
   }
   saveNoteBounds(id, win);
-  stopDetachedWatch(win);
-  liftStates.delete(win.id);
   closingNoteIds.add(id);
   try {
     win.destroy();
@@ -803,6 +287,7 @@ function ensureNoteWindow(id) {
     ? { x: saved.x, y: saved.y, width: NOTES_WIDTH, height: saved.height }
     : defaultNoteBounds());
   const win = new BrowserWindow({
+    parent: mainWindow ?? undefined,
     width: bounds.width,
     height: bounds.height,
     x: bounds.x,
@@ -826,7 +311,6 @@ function ensureNoteWindow(id) {
       sandbox: true,
     },
   });
-  const windowId = win.id;
   noteWindows.set(id, win);
   if (process.env.VITE_DEV_SERVER_URL) {
     const url = new URL(process.env.VITE_DEV_SERVER_URL);
@@ -836,13 +320,26 @@ function ensureNoteWindow(id) {
   } else {
     win.loadFile(path.join(__dirname, '..', 'dist', 'index.html'), { query: { view: 'note', id } });
   }
-  win.webContents.on('context-menu', (_event, params) => showEditContextMenu(win, params));
   win.webContents.on('did-finish-load', () => {
     pushNoteState(id);
     showNoteWindow(id);
   });
   win.webContents.on('render-process-gone', () => {
     if (!isQuitting && !win.isDestroyed()) win.webContents.reload();
+  });
+  let saveMovedPosition;
+  win.on('move', () => {
+    clearTimeout(saveMovedPosition);
+    saveMovedPosition = setTimeout(() => saveNoteBounds(id, win), 180);
+  });
+  win.on('focus', () => {
+    focusedNote = win;
+    updateDesktopOrder();
+  });
+  win.on('blur', () => {
+    if (noteDrag?.id === id) endNoteDrag();
+    if (focusedNote === win) focusedNote = null;
+    updateDesktopOrder();
   });
   win.on('close', (event) => {
     if (isQuitting || closingNoteIds.has(id)) return;
@@ -853,8 +350,11 @@ function ensureNoteWindow(id) {
     if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send('notes:open-changed', id, false);
   });
   win.on('closed', () => {
+    clearTimeout(saveMovedPosition);
     noteWindows.delete(id);
-    liftStates.delete(windowId);
+    if (noteDrag?.id === id) endNoteDrag();
+    if (focusedNote === win) focusedNote = null;
+    updateDesktopOrder();
   });
   return win;
 }
@@ -880,48 +380,46 @@ function syncNoteWindows() {
   pushAllNoteStates();
 }
 
-function startNoteDrag(id) {
+function startNoteDrag(id, grabX, grabY) {
+  if (!Number.isFinite(grabX) || !Number.isFinite(grabY)) return;
   const win = noteWindows.get(id);
   if (!win || win.isDestroyed()) return;
-  if (noteDrag) clearInterval(noteDrag.timer);
+  endNoteDrag();
   noteDrag = {
     id,
-    cursor: screen.getCursorScreenPoint(),
-    bounds: win.getBounds(),
-    startedAt: Date.now(),
-    timer: setInterval(updateNoteDrag, 16),
+    origin: win.getBounds(),
+    grabX,
+    grabY,
+    height: null,
   };
-  sendDesktopCommand('raise', win);
 }
 
-function updateNoteDrag() {
-  if (!noteDrag) return;
-  const win = noteWindows.get(noteDrag.id);
-  if (!win || win.isDestroyed() || Date.now() - noteDrag.startedAt > 20_000) {
-    endNoteDrag();
-    return;
-  }
-  const cursor = screen.getCursorScreenPoint();
-  const next = clampNoteBounds({
-    x: noteDrag.bounds.x + cursor.x - noteDrag.cursor.x,
-    y: noteDrag.bounds.y + cursor.y - noteDrag.cursor.y,
-    width: noteDrag.bounds.width,
-    height: noteDrag.bounds.height,
-  });
-  const current = win.getBounds();
-  if (next.x !== current.x || next.y !== current.y) win.setBounds(next);
+function moveNote(win) {
+  const pointer = screen.getCursorScreenPoint();
+  const { origin, grabX, grabY } = noteDrag;
+  const next = clampNoteBounds({ ...origin, x: pointer.x - grabX, y: pointer.y - grabY });
+  const [x, y] = win.getPosition();
+  if (x === next.x && y === next.y) return;
+  const position = { x: next.x, y: next.y };
+  if (process.platform === 'win32' && moveNoteWindow(win, screen.dipToScreenPoint(position))) return;
+  win.setPosition(next.x, next.y);
 }
 
 function endNoteDrag() {
-  if (!noteDrag) return;
-  clearInterval(noteDrag.timer);
-  saveNoteBounds(noteDrag.id);
+  const drag = noteDrag;
+  if (!drag) return;
   noteDrag = null;
+  if (drag.height != null) resizeNoteWindow(drag.id, drag.height);
+  saveNoteBounds(drag.id);
 }
 
 function resizeNoteWindow(id, height) {
   const win = noteWindows.get(id);
   if (!win || win.isDestroyed()) return;
+  if (noteDrag?.id === id) {
+    noteDrag.height = height;
+    return;
+  }
   const numeric = Number(height);
   if (!Number.isFinite(numeric)) return;
   const current = win.getBounds();
@@ -939,7 +437,7 @@ function resizeNoteWindow(id, height) {
   }
 }
 
-function showEditContextMenu(win, params) {
+function showEditContextMenu(win, params, noteActions = []) {
   const editFlags = params.editFlags || {};
   const template = [];
   if (params.isEditable) {
@@ -962,13 +460,13 @@ function showEditContextMenu(win, params) {
   } else {
     return;
   }
-  liftWindowForInput(win);
+  if (noteActions.length) template.push({ type: 'separator' }, ...noteActions);
+  focusWindow(win);
   const menu = Menu.buildFromTemplate(template);
-  contextMenuOpen = true;
+  contextMenuWindow = win;
   menu.once('menu-will-close', () => {
-    contextMenuOpen = false;
-    const state = getLiftState(win);
-    if (state.detached) startDetachedWatch(win);
+    contextMenuWindow = null;
+    updateDesktopOrder();
   });
   menu.popup({ window: win, x: Math.round(params.x), y: Math.round(params.y) });
 }
@@ -1055,6 +553,21 @@ async function checkForUpdatesInBackground() {
   }
 }
 
+async function repairDesktopFromTray() {
+  const status = await repairDesktopInput();
+  const messages = {
+    enabled: 'Windows 桌面当前已启用鼠标输入。',
+    restored: '已恢复 Windows 桌面的鼠标输入。',
+    busy: '桌面有一个系统弹窗。请先关闭它，再尝试修复。',
+    unavailable: '暂时无法修复桌面输入。',
+  };
+  await dialog.showMessageBox({
+    type: status === 'busy' || status === 'unavailable' ? 'warning' : 'info',
+    title: '桌面图标点击',
+    message: messages[status] ?? messages.unavailable,
+  });
+}
+
 function updateTrayMenu() {
   if (!tray) return;
   const menu = Menu.buildFromTemplate([
@@ -1081,6 +594,7 @@ function updateTrayMenu() {
     { label: '跟随 Windows 启动', type: 'checkbox', checked: latestSettings.autoStartEnabled, click: () => sendMenuAction('toggle:autoStartEnabled') },
     { label: '背景、透明度与更多设置…', click: () => sendMenuAction('open-settings') },
     { type: 'separator' },
+    { label: '修复桌面图标点击', visible: process.platform === 'win32', click: () => void repairDesktopFromTray() },
     { label: '退出浮屿', click: quitApp },
   ]);
   tray.setContextMenu(menu);
@@ -1101,6 +615,7 @@ function createWindow() {
   const height = savedBounds ? savedBounds.height : Math.min(760, workArea.height - 64);
 
   mainWindow = new BrowserWindow({
+    minimizable: false,
     width,
     height,
     minWidth: 760,
@@ -1133,10 +648,12 @@ function createWindow() {
   }
 
   mainWindow.once('ready-to-show', () => presentWindow(false));
-  mainWindow.on('minimize', minimizeWindow);
+  mainWindow.on('focus', updateDesktopOrder);
+  mainWindow.on('blur', updateDesktopOrder);
   mainWindow.on('close', saveWindowBounds);
   mainWindow.webContents.on('context-menu', (_event, params) => showEditContextMenu(mainWindow, params));
   mainWindow.webContents.on('render-process-gone', () => {
+    nutstore.cancelPendingPull();
     if (!isQuitting && mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.reload();
   });
   mainWindow.webContents.on('did-fail-load', (_event, code) => {
@@ -1148,7 +665,7 @@ function createWindow() {
   });
   mainWindow.on('closed', () => {
     adjustment = null;
-    desktopLayer.raised = null;
+    calendarRequested = false;
     mainWindow = null;
     if (!isQuitting) setTimeout(createWindow, 800);
   });
@@ -1178,17 +695,9 @@ if (!hasSingleInstanceLock) {
     await restoreSavedSettings();
     createWindow();
     createTray();
-    setTimeout(ensureFocusHelper, 1500);
-    startDesktopLayerWatch();
+    desktopOrderTimer = setInterval(updateDesktopOrder, 250);
     await applyIntegrationSettings();
     if (latestSettings.autoCheckUpdates) void checkForUpdatesInBackground();
-    setInterval(() => {
-      if (mainWindow && !mainWindow.isDestroyed() && mainWindow.isVisible() && !getLiftState(mainWindow)?.detached) attachToDesktop();
-      noteWindows.forEach((win, id) => {
-        const note = noteById(id);
-        if (note?.open === true && win.isVisible() && !win.isDestroyed() && !getLiftState(win)?.detached) attachToDesktop(false, win);
-      });
-    }, 30_000);
     setInterval(() => {
       if (latestSettings.autoCheckUpdates) void checkForUpdatesInBackground();
     }, 12 * 60 * 60 * 1000);
@@ -1201,19 +710,10 @@ if (!hasSingleInstanceLock) {
 
   app.on('will-quit', () => {
     globalShortcut.unregisterAll();
-    if (desktopLayer.timer) clearInterval(desktopLayer.timer);
-    desktopLayer.timer = null;
+    clearInterval(desktopOrderTimer);
+    stopDesktopOrder();
     endNoteDrag();
     saveAllNoteBounds();
-    if (focusHelper) {
-      try {
-        focusHelper.stdin.write('styles:0:0\n');
-        focusHelper.stdin.end();
-      } catch {
-        focusHelper.kill();
-      }
-      focusHelper = null;
-    }
   });
   app.on('window-all-closed', () => {
     if (isQuitting) app.quit();
@@ -1235,10 +735,23 @@ ipcMain.handle('state:save', async (_event, state) => {
   }
   latestSettings = { ...latestSettings, ...state.settings };
   updateTrayMenu();
+  updateDesktopOrder();
+  await persistState(state);
   await applyIntegrationSettings();
-  await fs.mkdir(path.dirname(statePath()), { recursive: true });
-  await fs.writeFile(statePath(), JSON.stringify(state, null, 2), 'utf8');
 });
+
+function persistState(state) {
+  const target = statePath();
+  const temp = `${target}.tmp`;
+  const snapshot = JSON.stringify(state, null, 2);
+  const write = stateWrites.then(async () => {
+    await fs.mkdir(path.dirname(target), { recursive: true });
+    await fs.writeFile(temp, snapshot, 'utf8');
+    await fs.rename(temp, target);
+  });
+  stateWrites = write.catch(() => {});
+  return write;
+}
 
 ipcMain.handle('window:minimize', minimizeWindow);
 
@@ -1251,23 +764,41 @@ ipcMain.on('notes:sync', (_event, payload) => {
   syncNoteWindows();
 });
 
-ipcMain.on('note:ready', (_event, id) => {
-  pushNoteState(id);
+ipcMain.handle('note:ready', (event, id) => {
+  const win = noteWindows.get(id);
+  const note = noteById(id);
+  if (!win || win.isDestroyed() || win.webContents !== event.sender || !note || !notesSync.appearance) return null;
   showNoteWindow(id);
+  return { note, appearance: notesSync.appearance };
 });
 
-ipcMain.on('note:change', (_event, message) => {
+ipcMain.on('note:change', (event, message) => {
   if (!message || typeof message !== 'object') return;
   const id = typeof message.id === 'string' ? message.id : '';
   const note = noteById(id);
-  if (!note) return;
+  if (!note || noteWindows.get(id)?.webContents !== event.sender) return;
   const patch = message.patch && typeof message.patch === 'object' ? message.patch : {};
   const next = { ...note };
-  if (typeof patch.text === 'string') next.text = patch.text;
+  if (typeof patch.text === 'string') {
+    next.text = patch.text;
+    next.richText = typeof patch.richText === 'string' ? patch.richText : undefined;
+  }
   if (typeof patch.completed === 'boolean') next.completed = patch.completed;
   const index = notesSync.notes.indexOf(note);
   if (index >= 0) notesSync.notes[index] = next;
-  if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send('notes:patch', { id, patch: { text: next.text, completed: next.completed } });
+  if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send('notes:patch', { id, patch: { text: next.text, richText: next.richText, completed: next.completed } });
+});
+
+ipcMain.on('note:format-menu', (event, payload) => {
+  const { id, x, y, hasSelection } = payload ?? {};
+  const win = noteWindows.get(id);
+  if (!win || win.isDestroyed() || win.webContents !== event.sender || !Number.isFinite(x) || !Number.isFinite(y)) return;
+  const send = (format) => {
+    if (!win.isDestroyed()) win.webContents.send('note:format', format);
+  };
+  showEditContextMenu(win, { isEditable: true, x, y, editFlags: { canCut: hasSelection, canCopy: hasSelection } }, [
+    { label: '插入勾选框', click: () => send({ type: 'checkbox' }) },
+  ]);
 });
 
 ipcMain.on('note:close', (_event, id) => {
@@ -1292,47 +823,35 @@ ipcMain.on('note:new', () => {
 });
 
 ipcMain.on('note:focus', (_event, id) => {
-  const win = noteWindows.get(id);
-  if (!win || win.isDestroyed()) return;
+  if (typeof id !== 'string') return;
+  noteToFocus = id;
   notesSuppressed = false;
   showNoteWindow(id);
-  if (win.isVisible()) liftWindowForInput(win);
 });
 
-ipcMain.on('note:drag-start', (_event, id) => startNoteDrag(id));
-ipcMain.on('note:drag-move', (_event, id) => {
-  if (noteDrag?.id === id) updateNoteDrag();
+ipcMain.on('note:drag-start', (event, id, x, y) => {
+  if (noteWindows.get(id)?.webContents === event.sender) startNoteDrag(id, x, y);
 });
-ipcMain.on('note:drag-end', (_event, id) => {
-  if (noteDrag?.id === id) endNoteDrag();
+ipcMain.on('note:drag-move', (event, id) => {
+  const win = noteWindows.get(id);
+  if (noteDrag?.id === id && win?.webContents === event.sender) moveNote(win);
+});
+ipcMain.on('note:drag-end', (event, id) => {
+  if (noteDrag?.id === id && noteWindows.get(id)?.webContents === event.sender) endNoteDrag();
 });
 ipcMain.on('note:resize', (_event, id, height) => resizeNoteWindow(id, height));
 
-ipcMain.handle('desktop:interactive', (_event, active) => {
-  interactionHold = active === true;
-  updateDesktopLayer();
-});
-
-ipcMain.handle('desktop:begin-input', (event) => {
-  const win = BrowserWindow.fromWebContents(event.sender);
-  return liftWindowForInput(win && !win.isDestroyed() ? win : mainWindow);
-});
-
-ipcMain.handle('window:focus', (event) => {
-  const win = BrowserWindow.fromWebContents(event.sender);
-  const target = win && !win.isDestroyed() ? win : mainWindow;
-  if (!target || target.isDestroyed()) return false;
-  if (!target.isVisible()) target.show();
-  target.focus();
-  target.webContents.focus();
-  grantOsFocus(target);
-  return target.isFocused();
+ipcMain.handle('calendar:focus-input', (event) => {
+  if (event.sender !== mainWindow?.webContents || !mainWindow.isVisible()) return;
+  if (!mainWindow.isFocused() || !event.sender.isFocused()) focusWindow();
+  updateDesktopOrder();
 });
 
 ipcMain.handle('window:adjust-mode', (_event, enabled) => {
   if (!mainWindow || mainWindow.isDestroyed()) return;
   adjustment = null;
   mainWindow.setResizable(enabled === true);
+  updateDesktopOrder();
 });
 
 ipcMain.handle('window:adjust-start', (_event, mode, resizeEdges) => {
@@ -1397,3 +916,14 @@ ipcMain.handle('sync:connect', (_event, payload) => nutstore.connect(payload && 
 ipcMain.handle('sync:disconnect', () => nutstore.disconnect());
 ipcMain.handle('sync:auto', (_event, enabled) => nutstore.setAutoSync(enabled === true));
 ipcMain.handle('sync:now', (_event, state, options) => nutstore.syncNow(state, options && typeof options === 'object' ? options : {}));
+
+ipcMain.handle('sync:finish-pull', async (_event, id, state) => {
+  if (!nutstore.hasPendingPull(id)) return nutstore.getStatus();
+  try {
+    if (state) await persistState(state);
+    return nutstore.finishPull(id, Boolean(state));
+  } catch (error) {
+    nutstore.finishPull(id, false);
+    throw error;
+  }
+});

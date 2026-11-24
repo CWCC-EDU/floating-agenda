@@ -118,16 +118,19 @@ select { font: inherit; }
   width: 100%;
   max-height: none;
 }
-.note-window-root.is-dragging { cursor: grabbing; }
 .note-window-body { padding: 7px; }
 .note-window-body .sticky-note { padding: 4px 6px; }
-.note-window-panel .sticky-note textarea { resize: none; overflow-y: auto; }
-.window-menu-note-list { max-height: 148px; margin: 2px 0 3px 6px; padding-left: 4px; overflow-y: auto; border-left: 2px solid #e4ebec; scrollbar-width: thin; }
-.window-function-menu .window-menu-note-list button { min-height: 28px; padding: 4px 6px; grid-template-columns: 16px minmax(0, 1fr) auto; font-size: 11px; }
-.window-menu-note-list button span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.window-menu-note-list button em { color: #93a3a8; font-size: 9px; font-style: normal; }
-.window-menu-note-list button.is-open em,
-.window-menu-note-list button.is-open svg { color: #1f9a76; }
+.note-rich-editor { position: relative; flex: 1; min-width: 0; min-height: 72px; max-height: 420px; overflow: auto; outline: none; font-size: var(--note-font-size); line-height: 1.5; white-space: pre-wrap; overflow-wrap: anywhere; }
+.note-rich-editor[data-empty='true']::before { content: '写点什么…'; position: absolute; inset: 0; opacity: .4; pointer-events: none; }
+.sticky-note.is-completed .note-rich-editor { text-decoration: line-through; opacity: .5; }
+.note-rich-editor [data-note-check] { display: inline-block; padding: 0 2px; cursor: pointer; user-select: none; }
+.note-rich-editor [data-note-check]:focus-visible { outline: 1px solid currentColor; border-radius: 2px; }
+.note-format-bar { padding: 3px 8px 5px; border-top: 1px solid rgba(255, 255, 255, .12); }
+.note-format-actions, .note-format-colors { display: flex; flex-wrap: wrap; align-items: center; gap: 5px; }
+.note-format-bar button { display: inline-flex; align-items: center; justify-content: center; gap: 4px; min-height: 23px; padding: 0 5px; border: 1px solid transparent; border-radius: 4px; background: transparent; color: inherit; font-size: 10px; cursor: pointer; }
+.note-format-bar button:hover:not(:disabled) { border-color: currentColor; }
+.note-format-colors { padding: 4px 5px 1px; }
+.note-format-bar .note-format-swatch { width: 19px; min-height: 16px; border-color: rgba(255, 255, 255, .3); }
 .calendar-task.is-rollover-ghost { opacity: 0.6; }
 .calendar-task.is-rollover-ghost:hover { opacity: 0.85; }
 .calendar-task.is-rollover-ghost .task-title { font-style: italic; }
@@ -240,6 +243,10 @@ select { font: inherit; }
 .proxy-input-row { display: flex; align-items: center; justify-content: space-between; gap: 12px; min-height: 44px; border-bottom: 1px solid #edf1f2; color: #42535a; font-size: 10px; }
 .proxy-input-row input { width: 230px; height: 28px; padding: 0 8px; border: 1px solid #d9e2e5; border-radius: 3px; color: #52656c; background: #fff; font-size: 9px; }
 .settings-link-button { display: flex; width: 100%; min-height: 42px; align-items: center; justify-content: space-between; padding: 0; border: 0; color: #2ca6c8; background: transparent; font-size: 10px; cursor: pointer; }
+.settings-note-entry { display: flex; align-items: center; gap: 8px; border-bottom: 1px solid #edf1f2; }
+.settings-note-entry .settings-note-row { min-width: 0; border-bottom: 0; }
+.settings-note-destroy { flex: 0 0 auto; padding: 3px 5px; border: 0; background: transparent; color: #a34343; font-size: 10px; cursor: pointer; }
+.settings-note-destroy:hover { color: #762525; }
 .settings-note-row { display: flex; width: 100%; min-height: 34px; align-items: center; justify-content: space-between; gap: 10px; padding: 0; border: 0; border-bottom: 1px solid #edf1f2; color: #52666e; background: transparent; font-size: 10px; text-align: left; cursor: pointer; }
 .settings-note-row span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .settings-note-row em { flex: 0 0 auto; color: #9aa8ad; font-size: 9px; font-style: normal; }

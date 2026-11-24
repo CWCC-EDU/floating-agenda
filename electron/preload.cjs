@@ -5,9 +5,7 @@ contextBridge.exposeInMainWorld('desktop', {
   loadState: () => ipcRenderer.invoke('state:load'),
   saveState: (state) => ipcRenderer.invoke('state:save', state),
   minimizeWindow: () => ipcRenderer.invoke('window:minimize'),
-  focusWindow: () => ipcRenderer.invoke('window:focus'),
-  setInteractionActive: (active) => ipcRenderer.invoke('desktop:interactive', active),
-  beginInput: () => ipcRenderer.invoke('desktop:begin-input'),
+  focusCalendarInput: () => ipcRenderer.invoke('calendar:focus-input'),
   setWindowAdjustmentMode: (enabled) => ipcRenderer.invoke('window:adjust-mode', enabled),
   startWindowAdjustment: (mode, resizeEdges) => ipcRenderer.invoke('window:adjust-start', mode, resizeEdges),
   updateWindowAdjustment: () => ipcRenderer.invoke('window:adjust-update'),
@@ -18,9 +16,16 @@ contextBridge.exposeInMainWorld('desktop', {
   syncConnect: (payload) => ipcRenderer.invoke('sync:connect', payload),
   syncDisconnect: () => ipcRenderer.invoke('sync:disconnect'),
   syncSetAutoSync: (enabled) => ipcRenderer.invoke('sync:auto', enabled),
+  syncFinishPull: (id, state) => ipcRenderer.invoke('sync:finish-pull', id, state),
   syncNow: (state, options) => ipcRenderer.invoke('sync:now', state, options),
   syncNotes: (payload) => ipcRenderer.send('notes:sync', payload),
-  noteReady: (id) => ipcRenderer.send('note:ready', id),
+  showNoteFormatMenu: (id, x, y, hasSelection) => ipcRenderer.send('note:format-menu', { id, x, y, hasSelection }),
+  onNoteFormat: (callback) => {
+    const listener = (_event, format) => callback(format);
+    ipcRenderer.on('note:format', listener);
+    return () => ipcRenderer.removeListener('note:format', listener);
+  },
+  noteReady: (id) => ipcRenderer.invoke('note:ready', id),
   sendNoteChange: (id, patch) => ipcRenderer.send('note:change', { id, patch }),
   closeNote: (id) => ipcRenderer.send('note:close', id),
   deleteNote: (id) => ipcRenderer.send('note:delete', id),
@@ -51,8 +56,8 @@ contextBridge.exposeInMainWorld('desktop', {
     ipcRenderer.on('notes:create', listener);
     return () => ipcRenderer.removeListener('notes:create', listener);
   },
-  startNoteDrag: (id) => ipcRenderer.send('note:drag-start', id),
-  dragNoteWindow: (id) => ipcRenderer.send('note:drag-move', id),
+  startNoteDrag: (id, x, y) => ipcRenderer.send('note:drag-start', id, x, y),
+  moveNoteDrag: (id) => ipcRenderer.send('note:drag-move', id),
   endNoteDrag: (id) => ipcRenderer.send('note:drag-end', id),
   resizeNoteWindow: (id, height) => ipcRenderer.send('note:resize', id, height),
   onMenuAction: (callback) => {

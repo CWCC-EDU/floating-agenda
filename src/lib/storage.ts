@@ -135,6 +135,7 @@ function normalizeNote(value: Partial<StickyNote>): StickyNote | null {
   return {
     id: value.id,
     text: value.text,
+    ...(typeof value.richText === 'string' ? { richText: value.richText } : {}),
     completed: Boolean(value.completed),
     createdAt: value.createdAt ?? new Date().toISOString(),
     open: value.open === true,
@@ -187,11 +188,8 @@ export function normalizeAppState(value: unknown): AppState {
   settings.editorFontFamily = enumValue(raw.editorFontFamily, ['Microsoft YaHei', 'Segoe UI', 'PingFang SC', 'SimSun'] as const, settings.editorFontFamily);
   settings.noteFontFamily = enumValue(raw.noteFontFamily, ['Microsoft YaHei', 'Segoe UI', 'PingFang SC', 'SimSun'] as const, settings.noteFontFamily);
   settings.editorInputStyle = enumValue(raw.editorInputStyle, ['one-box', 'multi-row'] as const, settings.editorInputStyle);
-  settings.desktopIconLayer = enumValue(raw.desktopIconLayer, ['auto', 'above', 'below'] as const, settings.desktopIconLayer);
+  settings.desktopIconLayer = enumValue(raw.desktopIconLayer, ['above', 'below'] as const, settings.desktopIconLayer);
   const savedRevision = typeof raw.settingsRevision === 'number' ? raw.settingsRevision : 0;
-  if (savedRevision < 2 && settings.desktopIconLayer === 'auto') {
-    settings.desktopIconLayer = 'below';
-  }
   if (savedRevision < 3 && settings.showNotes) {
     notes.forEach((note) => { note.open = true; });
   }

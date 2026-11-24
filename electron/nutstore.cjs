@@ -13,24 +13,21 @@ let files = null;
 let configCache = null;
 let statusCache = null;
 let inFlight = null;
+let pendingPull = null;
 
 function init({ userDataPath }) {
   files = {
     credentials: path.join(userDataPath, 'nutstore-credentials.bin'),
     status: path.join(userDataPath, 'nutstore-status.json'),
     backups: path.join(userDataPath, 'sync-backups'),
-    state: path.join(userDataPath, 'floating-agenda.json'),
   };
   configCache = null;
   statusCache = null;
-}
-
-function davRoot() {
-  return (process.env.FLOATING_AGENDA_DAV_ROOT || DEFAULT_DAV_ROOT).replace(/\/+$/, '');
+  pendingPull = null;
 }
 
 function remoteDirUrl() {
-  return `${davRoot()}/${REMOTE_DIR_NAME}`;
+  return `${DEFAULT_DAV_ROOT}/${REMOTE_DIR_NAME}`;
 }
 
 function remoteFileUrl() {
@@ -134,7 +131,7 @@ async function davRequest(method, url, config, options = {}) {
         ...(options.headers || {}),
       },
       body: options.body,
-      redirect: 'follow',
+      redirect: 'error',
       signal: controller.signal,
     });
   } catch (error) {
@@ -147,12 +144,12 @@ async function davRequest(method, url, config, options = {}) {
 
 async function verifyCredentials(config) {
   const body = '<?xml version="1.0" encoding="utf-8"?><d:propfind xmlns:d="DAV:"><d:prop><d:resourcetype/></d:prop></d:propfind>';
-  let response = await davRequest('PROPFIND', `${davRoot()}/`, config, {
+  let response = await davRequest('PROPFIND', `${DEFAULT_DAV_ROOT}/`, config, {
     headers: { Depth: '0', 'Content-Type': 'application/xml; charset=utf-8' },
     body,
   });
   if (response.status === 405 || response.status === 501) {
-    response = await davRequest('GET', `${davRoot()}/`, config);
+    response = await davRequest('GET', `${DEFAULT_DAV_ROOT}/`, config);
   }
   if (response.status === 401 || response.status === 403) {
     throw new Error('账号或应用密码不正确');
@@ -184,27 +181,11 @@ function pruneBackups() {
 function writeBackup(prefix, content) {
   try {
     fs.mkdirSync(files.backups, { recursive: true });
-    fs.writeFileSync(path.join(files.backups, `${prefix}-${backupStamp()}.json`), content);
-    pruneBackups();
+    fs.writeFileSync(path.join(files.backups, `${prefix}-${backupStamp()}.json`), content, { flag: 'wx' });
   } catch {
-    // Backups are best-effort and must not break sync.
+    throw new Error('无法创建本机同步备份，已取消覆盖');
   }
-}
-
-function backupLocalState(reason) {
-  try {
-    writeBackup(`local-${reason}`, fs.readFileSync(files.state, 'utf8'));
-  } catch {
-    // No local state file yet.
-  }
-}
-
-function backupRemoteState(raw, reason) {
-  try {
-    writeBackup(`remote-${reason}`, raw);
-  } catch {
-    // Ignore backup failures.
-  }
+  pruneBackups();
 }
 
 function parseRemote(raw) {
@@ -214,7 +195,8 @@ function parseRemote(raw) {
   } catch {
     throw new Error('云端同步文件不是有效的 JSON');
   }
-  if (!parsed || typeof parsed !== 'object' || !parsed.state || typeof parsed.state !== 'object') {
+  if (!parsed || typeof parsed !== 'object' || !parsed.state || !Array.isArray(parsed.state.tasks) || !Array.isArray(parsed.state.notes)
+      || !parsed.state.settings || typeof parsed.state.settings !== 'object') {
     throw new Error('云端同步文件格式不正确');
   }
   return {
@@ -246,16 +228,8 @@ async function fetchRemote(config) {
     state: remote.state,
     savedAt: remote.savedAt,
     hash: hashState(remote.state),
-    mtime: Date.parse(response.headers.get('last-modified') || '') || (remote.savedAt ? Date.parse(remote.savedAt) : 0),
+    etag: response.headers.get('etag'),
   };
-}
-
-function localFileMtime() {
-  try {
-    return fs.statSync(files.state).mtimeMs;
-  } catch {
-    return 0;
-  }
 }
 
 async function ensureRemoteDir(config) {
@@ -266,8 +240,14 @@ async function ensureRemoteDir(config) {
 }
 
 async function pushRemote(config, localState, localHash, remote) {
-  await ensureRemoteDir(config);
-  if (remote && remote.exists) backupRemoteState(remote.raw, 'before-upload');
+  const headers = { 'Content-Type': 'application/json; charset=utf-8' };
+  if (remote?.exists) {
+    writeBackup('remote-before-upload', remote.raw);
+    if (remote.etag && !remote.etag.startsWith('W/')) headers['If-Match'] = remote.etag;
+  } else {
+    await ensureRemoteDir(config);
+    headers['If-None-Match'] = '*';
+  }
   const savedAt = new Date().toISOString();
   const payload = JSON.stringify({
     app: 'floating-agenda',
@@ -276,10 +256,11 @@ async function pushRemote(config, localState, localHash, remote) {
     state: localState,
   }, null, 2);
   const response = await davRequest('PUT', remoteFileUrl(), config, {
-    headers: { 'Content-Type': 'application/json; charset=utf-8' },
+    headers,
     body: payload,
   });
   if (response.status === 401 || response.status === 403) throw new Error('账号或应用密码不正确');
+  if (response.status === 412) throw new Error('同步期间云端文件有变动，请重新同步');
   if (!response.ok) throw new Error(`上传云端数据失败（HTTP ${response.status}）`);
   updateStatus({
     lastSyncAt: savedAt,
@@ -299,26 +280,39 @@ async function pushRemote(config, localState, localHash, remote) {
   };
 }
 
-function pullRemote(remote) {
-  backupLocalState('before-download');
-  const syncedAt = new Date().toISOString();
-  updateStatus({
-    lastSyncAt: syncedAt,
-    lastAttemptAt: syncedAt,
-    lastResult: 'pulled',
-    lastError: null,
-    lastLocalHash: remote.hash,
-    lastRemoteHash: remote.hash,
-    remoteSavedAt: remote.savedAt,
-  });
+function pullRemote(remote, localState) {
+  writeBackup('local-before-download', JSON.stringify(localState, null, 2));
+  pendingPull = { id: crypto.randomUUID(), hash: remote.hash, savedAt: remote.savedAt };
   return {
     ok: true,
     action: 'pulled',
     message: '已从坚果云下载最新数据',
     state: remote.state,
+    pullId: pendingPull.id,
     status: getStatus(),
     remote: summaryOf(remote.state, remote.savedAt),
   };
+}
+
+function finishPull(id, applied) {
+  if (!pendingPull || id !== pendingPull.id) return getStatus();
+  const pull = pendingPull;
+  pendingPull = null;
+  const now = new Date().toISOString();
+  if (applied) {
+    updateStatus({
+      lastSyncAt: now,
+      lastAttemptAt: now,
+      lastResult: 'pulled',
+      lastError: null,
+      lastLocalHash: pull.hash,
+      lastRemoteHash: pull.hash,
+      remoteSavedAt: pull.savedAt,
+    });
+  } else {
+    updateStatus({ lastAttemptAt: now, lastResult: 'conflict' });
+  }
+  return getStatus();
 }
 
 function conflictResult(remote) {
@@ -361,7 +355,7 @@ async function runSync(localState, options) {
     if (!remote.exists) {
       return { ok: false, action: 'error', message: '云端还没有数据可以下载', status: getStatus() };
     }
-    return pullRemote(remote);
+    return pullRemote(remote, localState);
   }
 
   if (!remote.exists) {
@@ -372,14 +366,15 @@ async function runSync(localState, options) {
   if (!hasBaseline) {
     const localEmpty = stateIsEmpty(localState);
     const remoteEmpty = stateIsEmpty(remote.state);
-    if (localEmpty && !remoteEmpty) return pullRemote(remote);
+    if (localEmpty && !remoteEmpty) return pullRemote(remote, localState);
     if (!localEmpty && remoteEmpty) return pushRemote(config, localState, localHash, remote);
-    if (localEmpty && remoteEmpty) {
+    if (localHash === remote.hash || (localEmpty && remoteEmpty)) {
+      updateStatus({ lastAttemptAt: new Date().toISOString(), lastResult: 'up-to-date', lastError: null, lastLocalHash: localHash, lastRemoteHash: remote.hash, remoteSavedAt: remote.savedAt });
       return {
         ok: true,
         action: 'up-to-date',
-        message: '本机和云端都还没有日程',
-        status: updateStatus({ lastAttemptAt: new Date().toISOString(), lastResult: 'up-to-date', lastError: null, lastLocalHash: localHash, lastRemoteHash: remote.hash, remoteSavedAt: remote.savedAt }),
+        message: '已是最新状态',
+        status: getStatus(),
         remote: summaryOf(remote.state, remote.savedAt),
       };
     }
@@ -388,9 +383,9 @@ async function runSync(localState, options) {
 
   const localDirty = localHash !== meta.lastLocalHash;
   const remoteDirty = remote.hash !== meta.lastRemoteHash;
-  if (!localDirty && !remoteDirty) {
+  if (localHash === remote.hash || (!localDirty && !remoteDirty)) {
     const now = new Date().toISOString();
-    updateStatus({ lastAttemptAt: now, lastResult: 'up-to-date', lastError: null, remoteSavedAt: remote.savedAt });
+    updateStatus({ lastAttemptAt: now, lastResult: 'up-to-date', lastError: null, lastLocalHash: localHash, lastRemoteHash: remote.hash, remoteSavedAt: remote.savedAt });
     return {
       ok: true,
       action: 'up-to-date',
@@ -403,20 +398,14 @@ async function runSync(localState, options) {
     return pushRemote(config, localState, localHash, remote);
   }
   if (!localDirty && remoteDirty) {
-    return pullRemote(remote);
+    return pullRemote(remote, localState);
   }
 
-  const remoteTime = remote.mtime || (remote.savedAt ? Date.parse(remote.savedAt) : 0);
-  if (remoteTime > localFileMtime()) {
-    const result = pullRemote(remote);
-    return { ...result, message: '云端和本机都有修改，已保留较新的云端数据' };
-  }
-  const result = await pushRemote(config, localState, localHash, remote);
-  return { ...result, message: '云端和本机都有修改，已保留较新的本机数据' };
+  return conflictResult(remote);
 }
 
 function syncNow(localState, options = {}) {
-  if (inFlight) return Promise.resolve({ ok: false, action: 'busy', message: '正在同步，请稍候', status: getStatus() });
+  if (inFlight || pendingPull) return Promise.resolve({ ok: false, action: 'busy', message: '正在同步，请稍候', status: getStatus() });
   inFlight = runSync(localState, options)
     .catch((error) => {
       const message = error && error.message ? error.message : '同步失败';
@@ -439,7 +428,11 @@ async function connect({ email, appPassword, autoSync }) {
   const config = { email: trimmedEmail, password, autoSync: autoSync !== false };
   try {
     await verifyCredentials(config);
+    const accountChanged = readConfig()?.email !== config.email;
     writeConfig(config);
+    if (accountChanged) {
+      updateStatus({ lastLocalHash: null, lastRemoteHash: null, lastSyncAt: null, remoteSavedAt: null });
+    }
     updateStatus({ lastError: null, lastResult: 'connected' });
     return { ok: true, message: '连接成功，账号和应用密码已加密保存在本机', status: getStatus() };
   } catch (error) {
@@ -450,13 +443,14 @@ async function connect({ email, appPassword, autoSync }) {
 }
 
 function disconnect() {
-  configCache = null;
+  if (inFlight || pendingPull) return { ok: false, message: '正在同步，请稍候', status: getStatus() };
   try {
     fs.rmSync(files.credentials, { force: true });
   } catch {
-    // Ignore missing credentials file.
+    return { ok: false, message: '无法移除本机同步凭据', status: getStatus() };
   }
-  updateStatus({ lastResult: 'disconnected', lastError: null });
+  configCache = null;
+  updateStatus({ lastResult: 'disconnected', lastError: null, lastLocalHash: null, lastRemoteHash: null, lastSyncAt: null, remoteSavedAt: null });
   return { ok: true, message: '已断开坚果云，云端数据不会被删除', status: getStatus() };
 }
 
@@ -479,4 +473,7 @@ module.exports = {
   disconnect,
   setAutoSync,
   syncNow,
+  finishPull,
+  hasPendingPull: (id) => Boolean(pendingPull && pendingPull.id === id),
+  cancelPendingPull: () => { pendingPull = null; },
 };

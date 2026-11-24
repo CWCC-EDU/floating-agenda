@@ -193,9 +193,9 @@ export function DayEditorDialog({ date, tasks, initialTaskId, settings, onAutoSa
   useEffect(() => () => flushAutoSave(), []);
 
   useEffect(() => {
+    void window.desktop?.focusCalendarInput();
     const taskIndex = initialTaskId ? rows.findIndex((row) => row.id === initialTaskId) : -1;
     const lineIndex = taskIndex >= 0 ? taskIndex : rows.length - 1;
-    void window.desktop?.focusWindow();
     setActiveLine(lineIndex);
     if (multiRow) {
       requestAnimationFrame(() => {
@@ -445,7 +445,9 @@ export function DayEditorDialog({ date, tasks, initialTaskId, settings, onAutoSa
 
   return (
     <div className="modal-backdrop day-editor-backdrop" onMouseDown={(event) => event.target === event.currentTarget && onClose()}>
-      <section className="day-editor" style={editorStyle} role="dialog" aria-modal="true" aria-labelledby="day-editor-title">
+      <section className="day-editor" style={editorStyle} role="dialog" aria-modal="true" aria-labelledby="day-editor-title" onPointerDown={(event) => {
+        if ((event.target as HTMLElement).closest('input, textarea, [contenteditable]')) void window.desktop?.focusCalendarInput();
+      }}>
         <header className="day-editor-header">
           <div>
             <span className="eyebrow">DAILY NOTES</span>

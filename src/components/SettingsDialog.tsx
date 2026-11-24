@@ -2,12 +2,13 @@ import { useState, type CSSProperties, type KeyboardEvent, type ReactNode } from
 import { CalendarDays, ChevronRight, Cloud, Info, Keyboard, LayoutGrid, Monitor, RotateCcw, SlidersHorizontal, StickyNote as StickyNoteIcon, Type, X } from 'lucide-react';
 import { DEFAULT_SETTINGS } from '../lib/storage';
 import { SyncSettings } from './SyncSettings';
-import type { AppState, BulletStyle, CalendarLayout, DesktopIconLayer, EditorInputStyle, FontFamily, Settings, SoundEffect, StickyNote, TextBackground, UpdateCheckResult } from '../types';
+import type { AppState, NutstoreSyncResult, BulletStyle, CalendarLayout, DesktopIconLayer, EditorInputStyle, FontFamily, Settings, SoundEffect, StickyNote, TextBackground, UpdateCheckResult } from '../types';
 
 type Category = 'calendar' | 'cells' | 'appearance' | 'notes' | 'sync' | 'advanced' | 'about';
 type ShortcutKey = 'showHideShortcut' | 'toggleContentShortcut' | 'toggleNotesShortcut' | 'completeTaskShortcut';
 
 interface SettingsDialogProps {
+  initialCategory: Category;
   settings: Settings;
   notes: StickyNote[];
   appState: AppState;
@@ -16,7 +17,8 @@ interface SettingsDialogProps {
   onClose: () => void;
   onCreateNote: () => void;
   onOpenNote: (id: string) => void;
-  onApplyRemote: (state: unknown) => void;
+  onDestroyNote: (id: string) => void;
+  onApplyRemote: (result: NutstoreSyncResult, expected: AppState) => Promise<NutstoreSyncResult>;
 }
 
 const CATEGORIES = [
@@ -44,10 +46,9 @@ const EDITOR_STYLES: { value: EditorInputStyle; label: string }[] = [
   { value: 'one-box', label: '一条式' },
   { value: 'multi-row', label: '多条式' },
 ];
-const ICON_LAYERS: { value: DesktopIconLayer; label: string }[] = [
-  { value: 'auto', label: '自动 · 悬停时日历置顶' },
-  { value: 'above', label: '图标常在上 · 日历可操作' },
-  { value: 'below', label: '日历常在上 · 图标透视' },
+const DESKTOP_ICON_LAYERS: { value: DesktopIconLayer; label: string }[] = [
+  { value: 'below', label: '日历在图标上方（默认）' },
+  { value: 'above', label: '日历在图标下方' },
 ];
 const FONT_OPTIONS: { value: FontFamily; label: string }[] = [
   { value: 'Microsoft YaHei', label: '微软雅黑' },
@@ -183,14 +184,15 @@ function ShortcutRow({ title, setting, value, disabled, onChange }: { title: str
   );
 }
 
-export function SettingsDialog({ settings, notes, appState, isElectron, onChange, onClose, onCreateNote, onOpenNote, onApplyRemote }: SettingsDialogProps) {
-  const [category, setCategory] = useState<Category>('calendar');
+export function SettingsDialog({ initialCategory, settings, notes, appState, isElectron, onChange, onClose, onCreateNote, onOpenNote, onDestroyNote, onApplyRemote }: SettingsDialogProps) {
+  const [category, setCategory] = useState<Category>(initialCategory);
   const [updateResult, setUpdateResult] = useState<UpdateCheckResult | null>(null);
   const update = (patch: Partial<Settings>) => onChange({ ...settings, ...patch });
   const updateShortcut = (setting: ShortcutKey, value: string) => update({ [setting]: value });
   const numberOptions = (min: number, max: number, unit = '') => Array.from({ length: max - min + 1 }, (_, index) => ({ value: min + index, label: `${min + index}${unit}` }));
   const backgroundOptions: { value: TextBackground; label: string }[] = [{ value: 'none', label: '关闭' }, { value: 'soft', label: '柔和' }, { value: 'solid', label: '实色' }];
   const soundOptions: { value: SoundEffect; label: string }[] = [{ value: 'none', label: '无' }, { value: 'tick', label: '滴答' }, { value: 'chime', label: '小星星' }];
+  const closedBlankNotes = notes.filter((note) => !note.open && !note.text.trim());
   const title = CATEGORIES.find((item) => item.id === category)?.label ?? '日历设置';
 
   async function checkUpdates() {
@@ -300,6 +302,28 @@ export function SettingsDialog({ settings, notes, appState, isElectron, onChange
               </>}
 
               {category === 'notes' && <>
+                <Section title="便签管理">
+                  <button className="settings-link-button" type="button" onClick={onCreateNote}><span>新建便签窗口</span><ChevronRight size={16} /></button>
+                  {closedBlankNotes.length > 0 && (
+                    <button className="settings-link-button settings-note-destroy" type="button" onClick={() => {
+                      if (window.confirm(`永久销毁 ${closedBlankNotes.length} 张已关闭的空白便签？`)) {
+                        closedBlankNotes.forEach((note) => onDestroyNote(note.id));
+                      }
+                    }}>销毁已关闭的空白便签（{closedBlankNotes.length}）</button>
+                  )}
+                  {notes.map((note) => (
+                    <div className="settings-note-entry" key={note.id}>
+                      <button className="settings-note-row" type="button" title={note.text || '空白便签'} onClick={() => onOpenNote(note.id)}>
+                        <span>{(note.text.trim().split('\n')[0] || '空白便签').slice(0, 40)}</span>
+                        <em className={note.open ? 'is-open' : ''}>{note.open ? '已打开' : '已关闭'}</em>
+                      </button>
+                      <button className="settings-note-destroy" type="button" onClick={() => {
+                        if (window.confirm('永久销毁这张便签？')) onDestroyNote(note.id);
+                      }}>销毁</button>
+                    </div>
+                  ))}
+                  {notes.length === 0 && <p className="settings-note-empty">还没有便签。</p>}
+                </Section>
                 <Section title="便签外观">
                   {!isElectron && <ToggleRow title="显示桌面便签" checked={settings.showNotes} onChange={(showNotes) => update({ showNotes })} />}
                   <ChoiceCards value={settings.noteBulletStyle} options={BULLETS} kind="bullet" onChange={(noteBulletStyle) => update({ noteBulletStyle })} />
@@ -309,23 +333,14 @@ export function SettingsDialog({ settings, notes, appState, isElectron, onChange
                   <SelectRow title="显示文字背景" value={settings.noteTextBackground} options={backgroundOptions} onChange={(noteTextBackground) => update({ noteTextBackground })} />
                   <ToggleRow title="显示完成勾选框" checked={settings.showNoteCheckbox} onChange={(showNoteCheckbox) => update({ showNoteCheckbox })} />
                 </Section>
-                <Section title="便签窗口">
-                  <button className="settings-link-button" type="button" onClick={onCreateNote}><span>新建便签窗口</span><ChevronRight size={16} /></button>
-                  {notes.map((note) => (
-                    <button className="settings-note-row" type="button" key={note.id} title={note.text || '空白便签'} onClick={() => onOpenNote(note.id)}>
-                      <span>{(note.text.trim().split('\n')[0] || '空白便签').slice(0, 40)}</span>
-                      <em className={note.open ? 'is-open' : ''}>{note.open ? '已打开' : '已关闭'}</em>
-                    </button>
-                  ))}
-                  {notes.length === 0 && <p className="settings-note-empty">还没有便签。点击上方按钮新建一张。</p>}
-                  {isElectron && <p className="settings-note-empty">关闭便签窗口不会删除内容，可从右上角功能菜单重新打开。</p>}
-                </Section>
+
               </>}
 
               {category === 'sync' && <SyncSettings appState={appState} onApplyRemote={onApplyRemote} />}
 
               {category === 'advanced' && <>
                 <Section title="高级设置">
+                  <SelectRow title="桌面图标层级" description="日历在图标下方时，重叠的图标仍可点击。普通应用窗口始终优先显示。" value={settings.desktopIconLayer} options={DESKTOP_ICON_LAYERS} disabled={!isElectron} onChange={(desktopIconLayer) => update({ desktopIconLayer })} />
                   <SelectRow title="开始星期" value={settings.weekStartsOn} options={WEEKDAY_NAMES.map((label, value) => ({ value, label }))} onChange={(weekStartsOn) => update({ weekStartsOn })} />
                   <SelectRow title="设置第一周" description="ISO 周或包含 1 月 1 日的第一周" value={settings.weekNumberMode} options={[{ value: 'iso' as const, label: 'ISO 标准周' }, { value: 'jan1' as const, label: '包含 1 月 1 日' }]} onChange={(weekNumberMode) => update({ weekNumberMode })} />
                 </Section>
@@ -341,7 +356,6 @@ export function SettingsDialog({ settings, notes, appState, isElectron, onChange
                 </Section>
                 <Section title="软件设置">
                   <SelectRow title="语言" value={settings.language} options={[{ value: 'zh-CN' as const, label: '中国大陆 · 简体中文' }]} onChange={(language) => update({ language })} />
-                  <SelectRow title="桌面图标层级" description="自动：悬停时日历置顶；图标常在上：图标始终可见，日历仍可点击输入；日历常在上：图标透过日历显示，日历优先响应点击" value={settings.desktopIconLayer} options={ICON_LAYERS} disabled={!isElectron} onChange={(desktopIconLayer) => update({ desktopIconLayer })} />
                   <ToggleRow title="代理设置" description="仅用于应用自身的更新检查，不上传任务内容" checked={settings.proxyEnabled} disabled={!isElectron} onChange={(proxyEnabled) => update({ proxyEnabled })} />
                   {settings.proxyEnabled && <label className="proxy-input-row"><span>代理服务器</span><input value={settings.proxyServer} placeholder="例如 127.0.0.1:7890" onChange={(event) => update({ proxyServer: event.target.value })} /></label>}
                   <ToggleRow title="跟随 Windows 启动" description="使用当前便携 EXE 注册本机登录启动项" checked={settings.autoStartEnabled} disabled={!isElectron} onChange={(autoStartEnabled) => update({ autoStartEnabled })} />
