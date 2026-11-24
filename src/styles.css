@@ -795,7 +795,7 @@ button:disabled { cursor: not-allowed; opacity: 0.35; }
   border-radius: 19px;
   background: linear-gradient(155deg, rgba(32, 45, 55, 0.985), rgba(19, 29, 38, 0.99));
   box-shadow: 0 24px 70px rgba(0, 0, 0, 0.38), inset 0 1px 0 rgba(255, 255, 255, 0.055);
-  animation: dialog-in 180ms ease-out;
+  animation: dialog-in 170ms cubic-bezier(.22,.75,.25,1) both;
 }
 
 .dialog-header {
@@ -821,7 +821,7 @@ button:disabled { cursor: not-allowed; opacity: 0.35; }
   border-radius: 15px;
   background: linear-gradient(155deg, rgba(31, 46, 51, 0.99), rgba(18, 29, 34, 0.995));
   box-shadow: 0 25px 80px rgba(0, 0, 0, 0.42), inset 0 1px 0 rgba(255, 255, 255, 0.05);
-  animation: dialog-in 180ms ease-out;
+  animation: dialog-in 170ms cubic-bezier(.22,.75,.25,1) both;
 }
 .day-editor-header { display: flex; flex: 0 0 auto; align-items: center; gap: 5px; padding: 18px 17px 13px 21px; border-bottom: 1px solid rgba(255, 255, 255, 0.065); }
 .day-editor-header > div { flex: 1; }
@@ -947,7 +947,7 @@ button:disabled { cursor: not-allowed; opacity: 0.35; }
   font-size: 11px;
   font-weight: 500;
   cursor: pointer;
-  transition: all 150ms ease;
+  transition: background-color 150ms ease, border-color 150ms ease;
 }
 .button.primary { border: 1px solid rgba(217, 248, 226, 0.2); color: #223a2d; background: #addcbd; }
 .button.primary:hover { background: #c0e8cc; transform: translateY(-1px); }
@@ -1073,7 +1073,7 @@ button:disabled { cursor: not-allowed; opacity: 0.35; }
 @keyframes spin { to { transform: rotate(360deg); } }
 @keyframes fade-in { from { opacity: 0; } to { opacity: 1; } }
 @keyframes dialog-in { from { opacity: 0; transform: translateY(8px) scale(0.985); } to { opacity: 1; transform: translateY(0) scale(1); } }
-@keyframes toast-in { from { opacity: 0; margin-bottom: -7px; } to { opacity: 1; margin-bottom: 0; } }
+@keyframes toast-in { from { opacity: 0; transform: translateY(7px); } to { opacity: 1; transform: translateY(0); } }
 
 @media (max-width: 900px) {
   .calendar-titlebar { grid-template-columns: auto 1fr auto; }

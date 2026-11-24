@@ -7,6 +7,8 @@ export type TextBackground = 'none' | 'soft' | 'solid';
 export type SoundEffect = 'none' | 'tick' | 'chime';
 export type FontFamily = 'Microsoft YaHei' | 'Segoe UI' | 'PingFang SC' | 'SimSun';
 export type EditorInputStyle = 'one-box' | 'multi-row';
+export type ImageSkin = 'none' | 'coast' | 'earth' | 'local';
+export type SkinPosition = 'center' | 'left' | 'right' | 'top' | 'bottom';
 export type DesktopIconLayer = 'above' | 'below';
 
 export interface Task {
@@ -40,6 +42,10 @@ export interface Settings {
   rolloverWindow: number;
   opacity: number;
   backgroundColor: string;
+  imageSkin: ImageSkin;
+  skinPosition: SkinPosition;
+  skinOpacity: number;
+  skinShade: number;
   showWeekNumbers: boolean;
   showLunar: boolean;
   autoNumber: boolean;
@@ -124,6 +130,8 @@ export interface NutstoreSyncStatus {
   configured: boolean;
   email: string;
   autoSync: boolean;
+  intervalMinutes: number;
+  intervalOptions: number[];
   encryptionAvailable: boolean;
   remoteLocation: string;
   lastSyncAt: string | null;
@@ -149,13 +157,7 @@ export interface NutstoreSyncResult {
   status: NutstoreSyncStatus;
 }
 
-export interface NutstoreConnectResult {
-  ok: boolean;
-  message: string;
-  status: NutstoreSyncStatus;
-}
-
-export interface NutstoreAutoSyncResult {
+export interface NutstoreConfigResult {
   ok: boolean;
   message: string;
   status: NutstoreSyncStatus;
@@ -215,6 +217,8 @@ export interface DesktopBridge {
   loadState: () => Promise<unknown>;
   saveState: (state: AppState) => Promise<void>;
   minimizeWindow: () => Promise<void>;
+  loadThemeImage: () => Promise<string | null>;
+  saveThemeImage: (bytes: Uint8Array) => Promise<string>;
   focusCalendarInput: () => Promise<void>;
   setWindowAdjustmentMode: (enabled: boolean) => Promise<void>;
   startWindowAdjustment: (mode: WindowAdjustmentMode, resizeEdges?: WindowResizeEdge) => Promise<void>;
@@ -241,9 +245,10 @@ export interface DesktopBridge {
   endNoteDrag: (id: string) => void;
   resizeNoteWindow: (id: string, height: number) => void;
   syncGetStatus: () => Promise<NutstoreSyncStatus>;
-  syncConnect: (payload: { email: string; appPassword: string; autoSync: boolean }) => Promise<NutstoreConnectResult>;
-  syncDisconnect: () => Promise<NutstoreConnectResult>;
-  syncSetAutoSync: (enabled: boolean) => Promise<NutstoreAutoSyncResult>;
+  syncConnect: (payload: { email: string; appPassword: string; autoSync: boolean }) => Promise<NutstoreConfigResult>;
+  syncDisconnect: () => Promise<NutstoreConfigResult>;
+  syncSetAutoSync: (enabled: boolean) => Promise<NutstoreConfigResult>;
+  syncSetInterval: (intervalMinutes: number) => Promise<NutstoreConfigResult>;
   syncFinishPull: (id: string, state: AppState | null) => Promise<NutstoreSyncStatus>;
   syncNow: (state: AppState, options?: { manual?: boolean; strategy?: 'local' | 'remote' }) => Promise<NutstoreSyncResult>;
   onMenuAction: (callback: (action: DesktopMenuAction) => void) => () => void;

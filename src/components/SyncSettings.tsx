@@ -1,10 +1,14 @@
-import { useEffect, useState } from 'react';
+import { useState } from 'react';
 import { Cloud, CloudDownload, CloudUpload, RefreshCw, ShieldCheck, Unplug } from 'lucide-react';
-import type { AppState, NutstoreRemoteSummary, NutstoreSyncResult, NutstoreSyncStatus } from '../types';
+import type { AppState, NutstoreConfigResult, NutstoreRemoteSummary, NutstoreSyncResult, NutstoreSyncStatus } from '../types';
 
 interface SyncSettingsProps {
   appState: AppState;
   onApplyRemote: (result: NutstoreSyncResult, expected: AppState) => Promise<NutstoreSyncResult>;
+  status: NutstoreSyncStatus | null;
+  onStatusChange: (status: NutstoreSyncStatus) => void;
+  conflict: NutstoreRemoteSummary | null;
+  onConflictChange: (summary: NutstoreRemoteSummary | null) => void;
 }
 
 function formatTime(value: string | null): string {
@@ -14,38 +18,23 @@ function formatTime(value: string | null): string {
   return date.toLocaleString('zh-CN', { month: 'numeric', day: 'numeric', hour: '2-digit', minute: '2-digit' });
 }
 
-export function SyncSettings({ appState, onApplyRemote }: SyncSettingsProps) {
+export function SyncSettings({ appState, onApplyRemote, status, onStatusChange, conflict, onConflictChange }: SyncSettingsProps) {
   const desktop = window.desktop;
-  const [status, setStatus] = useState<NutstoreSyncStatus | null>(null);
-  const [email, setEmail] = useState('');
+  const [email, setEmail] = useState(status?.email ?? '');
   const [password, setPassword] = useState('');
   const [busy, setBusy] = useState(false);
   const [message, setMessage] = useState('');
   const [failed, setFailed] = useState(false);
-  const [conflict, setConflict] = useState<NutstoreRemoteSummary | null>(null);
-
-  useEffect(() => {
-    if (!desktop) return;
-    let active = true;
-    desktop.syncGetStatus().then((next) => {
-      if (!active) return;
-      setStatus(next);
-      setEmail(next.email);
-    }).catch(() => {
-      if (active) setMessage('无法读取同步设置');
-    });
-    return () => { active = false; };
-  }, [desktop]);
 
   function showResult(result: NutstoreSyncResult) {
-    setStatus(result.status);
+    onStatusChange(result.status);
     setMessage(result.message);
     setFailed(!result.ok && result.action !== 'conflict');
     if (result.action === 'conflict') {
-      setConflict(result.remote ?? { savedAt: null, taskCount: 0, noteCount: 0 });
+      onConflictChange(result.remote ?? { savedAt: null, taskCount: 0, noteCount: 0 });
       return;
     }
-    setConflict(null);
+    if (result.ok) onConflictChange(null);
   }
 
   async function runSync(options: { manual?: boolean; strategy?: 'local' | 'remote' } = { manual: true }) {
@@ -70,7 +59,7 @@ export function SyncSettings({ appState, onApplyRemote }: SyncSettingsProps) {
     setMessage('正在验证账号…');
     try {
       const result = await desktop.syncConnect({ email: email.trim(), appPassword: password, autoSync: true });
-      setStatus(result.status);
+      onStatusChange(result.status);
       setMessage(result.message);
       if (!result.ok) {
         setFailed(true);
@@ -86,12 +75,19 @@ export function SyncSettings({ appState, onApplyRemote }: SyncSettingsProps) {
     }
   }
 
-  async function toggleAutoSync(enabled: boolean) {
-    if (!desktop) return;
-    const result = await desktop.syncSetAutoSync(enabled);
-    setStatus(result.status);
-    setMessage(result.message);
-    setFailed(!result.ok);
+  async function savePreference(request: Promise<NutstoreConfigResult>) {
+    setBusy(true);
+    try {
+      const result = await request;
+      onStatusChange(result.status);
+      setMessage(result.message);
+      setFailed(!result.ok);
+    } catch {
+      setMessage('无法保存同步设置');
+      setFailed(true);
+    } finally {
+      setBusy(false);
+    }
   }
 
   async function disconnect() {
@@ -100,11 +96,11 @@ export function SyncSettings({ appState, onApplyRemote }: SyncSettingsProps) {
     setBusy(true);
     try {
       const result = await desktop.syncDisconnect();
-      setStatus(result.status);
+      onStatusChange(result.status);
       setMessage(result.message);
       setFailed(!result.ok);
       if (!result.ok) return;
-      setConflict(null);
+      onConflictChange(null);
       setPassword('');
     } finally {
       setBusy(false);
@@ -120,12 +116,10 @@ export function SyncSettings({ appState, onApplyRemote }: SyncSettingsProps) {
     );
   }
 
-  const configured = Boolean(status?.configured);
-
   return <>
     <section className="setting-section">
       <h3>坚果云同步</h3>
-      {!configured && <div className="sync-form">
+      {!status?.configured && <div className="sync-form">
         <label className="sync-field">
           <span>坚果云账号</span>
           <input type="email" value={email} placeholder="name@example.com" autoComplete="username" disabled={busy} onChange={(event) => setEmail(event.target.value)} />
@@ -141,16 +135,22 @@ export function SyncSettings({ appState, onApplyRemote }: SyncSettingsProps) {
         {status && !status.encryptionAvailable && <p className="sync-feedback is-error">当前系统无法加密保存密码，已停止连接。</p>}
       </div>}
 
-      {configured && <>
+      {status?.configured && <>
         <div className="sync-account">
           <span className="sync-account-icon"><Cloud size={17} /></span>
           <div><strong>已连接坚果云</strong><span>{status?.email}</span></div>
           <button type="button" className="sync-text-button" disabled={busy} onClick={() => void disconnect()}><Unplug size={13} />断开</button>
         </div>
         <div className="setting-row">
-          <div><strong>自动同步</strong><p>本机数据修改后自动上传，并定期检查云端更新</p></div>
-          <button className={`switch ${status?.autoSync ? 'is-on' : ''}`} type="button" role="switch" aria-checked={Boolean(status?.autoSync)} aria-label="自动同步" disabled={busy} onClick={() => void toggleAutoSync(!status?.autoSync)}><span /></button>
+          <div><strong>自动同步</strong><p>本机数据修改后约 8 秒同步，并定期检查云端更新</p></div>
+          <button className={`switch ${status.autoSync ? 'is-on' : ''}`} type="button" role="switch" aria-checked={status.autoSync} aria-label="自动同步" disabled={busy} onClick={() => void savePreference(desktop.syncSetAutoSync(!status.autoSync))}><span /></button>
         </div>
+        <label className={`setting-row setting-select-row ${status.autoSync ? '' : 'is-disabled'}`}>
+          <div><strong>自动同步间隔</strong><p>设置这台电脑检查云端更新的频率</p></div>
+          <select aria-label="自动同步间隔" value={status.intervalMinutes} disabled={busy || !status.autoSync} onChange={(event) => void savePreference(desktop.syncSetInterval(Number(event.target.value)))}>
+            {status.intervalOptions.map((minutes) => <option key={minutes} value={minutes}>{minutes} 分钟</option>)}
+          </select>
+        </label>
         <div className="sync-status-line">
           <span>上次同步：{formatTime(status?.lastSyncAt ?? null)}</span>
           <span>云端文件：{status?.remoteLocation}</span>

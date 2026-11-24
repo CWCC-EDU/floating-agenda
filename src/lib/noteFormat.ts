@@ -35,6 +35,29 @@ export function noteCheckHtml(checked: boolean): string {
   return check.outerHTML;
 }
 
+export function selectNoteLine(editor: HTMLElement, selection: Selection, node: Node, offset: number): boolean {
+  if (!editor.contains(node)) return false;
+  const limit = node.nodeType === Node.TEXT_NODE ? node.textContent?.length ?? 0 : node.childNodes.length;
+  selection.collapse(node, Math.min(offset, limit));
+  selection.modify('move', 'backward', 'paragraphboundary');
+  selection.modify('extend', 'forward', 'paragraphboundary');
+  return !selection.isCollapsed && selection.rangeCount > 0
+    && editor.contains(selection.getRangeAt(0).commonAncestorContainer);
+}
+
+export function restoreNoteCaret(editor: HTMLElement, selection: Selection, textOffset: number, preferStart: boolean) {
+  const walker = document.createTreeWalker(editor, NodeFilter.SHOW_TEXT);
+  for (let node = walker.nextNode() as Text | null; node; node = walker.nextNode() as Text | null) {
+    if (!node.length) continue;
+    if (textOffset < node.length || (textOffset === node.length && !preferStart)) {
+      selection.collapse(node, textOffset);
+      return;
+    }
+    textOffset -= node.length;
+  }
+  selection.collapse(editor, editor.childNodes.length);
+}
+
 export function cleanNoteHtml(html: string): string {
   const source = document.createElement('template');
   source.innerHTML = html;

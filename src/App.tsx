@@ -1,5 +1,5 @@
 import { Fragment, useCallback, useEffect, useMemo, useRef, useState, type CSSProperties, type MouseEvent, type PointerEvent } from 'react';
-import { CalendarDays, Check, ChevronDown, ChevronLeft, ChevronRight, ListChecks, LogOut, Menu, Move, Palette, Plus, Repeat2, Settings2, StickyNote as StickyNoteIcon } from 'lucide-react';
+import { CalendarDays, Check, ChevronDown, ChevronLeft, ChevronRight, ListChecks, LogOut, Menu, Move, Palette, Plus, RefreshCw, Repeat2, Settings2, StickyNote as StickyNoteIcon } from 'lucide-react';
 import { DayEditorDialog } from './components/DayEditorDialog';
 import { NotesPanel } from './components/NotesPanel';
 import { SettingsDialog } from './components/SettingsDialog';
@@ -7,8 +7,9 @@ import { addMonths, festivalLabel, fromDateKey, fullDateLabel, getCalendarColumn
 import { extendRecurringTasks, removeTaskSeries, rolloverTasks, sortTasks } from './lib/tasks';
 import { DEFAULT_SETTINGS, loadAppState, normalizeAppState, saveAppState } from './lib/storage';
 import { readableTextColor, taskFontSize } from './lib/appearance';
+import { readLocalSkin, skinImage } from './lib/skins';
 import { playSound } from './lib/sound';
-import type { AppState, NutstoreSyncResult, NotesAppearance, Settings, StickyNote, Task, TaskFilter, WindowAdjustmentMode, WindowResizeEdge } from './types';
+import type { AppState, NutstoreRemoteSummary, NutstoreSyncResult, NutstoreSyncStatus, NotesAppearance, Settings, StickyNote, Task, TaskFilter, WindowAdjustmentMode, WindowResizeEdge } from './types';
 
 const WEEKDAYS = ['星期日', '星期一', '星期二', '星期三', '星期四', '星期五', '星期六'];
 const WINDOW_RESIZE_EDGES: WindowResizeEdge[] = ['n', 's', 'e', 'w', 'ne', 'nw', 'se', 'sw'];
@@ -24,22 +25,45 @@ export default function App() {
   const [today, setToday] = useState(toDateKey());
   const [selectedDate, setSelectedDate] = useState(today);
   const [monthCursor, setMonthCursor] = useState(startOfMonth(today));
+  const [windowFocused, setWindowFocused] = useState(() => document.hasFocus());
+  const [localSkin, setLocalSkin] = useState<string | null>(null);
   const [filter, setFilter] = useState<TaskFilter>('all');
   const [state, setState] = useState<AppState>({ tasks: [], notes: [], settings: DEFAULT_SETTINGS });
   const [isReady, setIsReady] = useState(false);
   const [editor, setEditor] = useState<{ date: string; taskId?: string } | null>(null);
-  const [showSettings, setShowSettings] = useState<boolean | 'notes'>(false);
+  const [showSettings, setShowSettings] = useState<boolean | 'notes' | 'appearance' | 'sync'>(false);
   const [showWindowMenu, setShowWindowMenu] = useState(false);
   const [showContent, setShowContent] = useState(true);
   const [isAdjusting, setIsAdjusting] = useState(false);
   const [toast, setToast] = useState('');
+  const [syncStatus, setSyncStatus] = useState<NutstoreSyncStatus | null>(null);
+  const [syncConflict, setSyncConflict] = useState<NutstoreRemoteSummary | null>(null);
   const syncBusy = useRef(false);
   const syncConflictNotice = useRef('');
   const stateRef = useRef(state);
   stateRef.current = state;
+  const adjustmentFrame = useRef<number | null>(null);
   const adjustmentPointer = useRef<number | null>(null);
   const notifiedTasks = useRef(new Set<string>());
   const isElectron = Boolean(window.desktop);
+
+  useEffect(() => {
+    if (!isElectron) return;
+    const onFocus = () => setWindowFocused(true);
+    const onBlur = () => setWindowFocused(false);
+    window.addEventListener('focus', onFocus);
+    window.addEventListener('blur', onBlur);
+    return () => {
+      window.removeEventListener('focus', onFocus);
+      window.removeEventListener('blur', onBlur);
+    };
+  }, [isElectron]);
+
+  useEffect(() => {
+    let active = true;
+    readLocalSkin().then((image) => { if (active) setLocalSkin(image); }).catch(console.warn);
+    return () => { active = false; };
+  }, []);
 
   useEffect(() => {
     let active = true;
@@ -86,39 +110,67 @@ export default function App() {
     return { ...result, status };
   }, []);
 
-  const syncSilently = useCallback(async () => {
-    if (!window.desktop || syncBusy.current) return;
+  useEffect(() => {
+    let active = true;
+    window.desktop?.syncGetStatus().then((status) => {
+      if (active) setSyncStatus(status);
+    }).catch(console.warn);
+    return () => { active = false; };
+  }, []);
+
+  const syncCalendar = useCallback(async (manual = false) => {
+    if (!window.desktop) return;
+    if (syncBusy.current) {
+      if (manual) setToast('正在同步，请稍候');
+      return;
+    }
     syncBusy.current = true;
+    if (manual) setToast('正在同步…');
     try {
       const expected = stateRef.current;
-      const result = await applyRemoteState(await window.desktop.syncNow(expected, { manual: false }), expected);
+      const result = await applyRemoteState(await window.desktop.syncNow(expected, { manual }), expected);
+      setSyncStatus(result.status);
       if (result.action === 'conflict') {
+        setSyncConflict(result.remote ?? { savedAt: null, taskCount: 0, noteCount: 0 });
         const key = result.remote?.savedAt ?? 'conflict';
-        if (syncConflictNotice.current !== key) {
+        if (manual) {
+          setToast(result.message);
+          setShowSettings('sync');
+        } else if (syncConflictNotice.current !== key) {
           syncConflictNotice.current = key;
           setToast('坚果云上有另一份日历，请到 设置 → 同步 选择保留哪一份');
         }
+      } else {
+        if (result.ok) {
+          setSyncConflict(null);
+          syncConflictNotice.current = '';
+        }
+        if (manual) {
+          if (result.action !== 'pulled') setToast(result.message);
+          if (result.action === 'not-configured') setShowSettings('sync');
+        }
       }
     } catch {
-      // Automatic sync failures stay silent; the settings page shows details.
+      if (manual) setToast('同步失败，请稍后重试');
     } finally {
       syncBusy.current = false;
     }
   }, [applyRemoteState]);
 
-  useEffect(() => {
-    if (!isElectron || !isReady || showSettings || editor) return;
-    const timer = window.setTimeout(() => { void syncSilently(); }, 8000);
-    return () => window.clearTimeout(timer);
-  }, [editor, isElectron, isReady, showSettings, state, syncSilently]);
+  const autoSync = Boolean(syncStatus?.configured && syncStatus.autoSync);
+  const syncIntervalMinutes = syncStatus?.intervalMinutes ?? 5;
 
   useEffect(() => {
-    if (!isElectron || !isReady) return;
-    const timer = window.setInterval(() => {
-      if (!showSettings && !editor) void syncSilently();
-    }, 5 * 60 * 1000);
+    if (!autoSync || !isReady || showSettings || editor) return;
+    const timer = window.setTimeout(() => { void syncCalendar(); }, 8000);
+    return () => window.clearTimeout(timer);
+  }, [autoSync, editor, isReady, showSettings, state, syncCalendar]);
+
+  useEffect(() => {
+    if (!autoSync || !isReady || showSettings || editor) return;
+    const timer = window.setInterval(() => { void syncCalendar(); }, syncIntervalMinutes * 60_000);
     return () => window.clearInterval(timer);
-  }, [editor, isElectron, isReady, showSettings, syncSilently]);
+  }, [autoSync, editor, isReady, showSettings, syncCalendar, syncIntervalMinutes]);
 
   const createNote = useCallback(() => {
     const note = newStickyNote();
@@ -435,13 +487,21 @@ export default function App() {
   }
 
   function updateWindowAdjustment(event: PointerEvent<HTMLElement>) {
-    if (adjustmentPointer.current !== event.pointerId) return;
-    void window.desktop?.updateWindowAdjustment();
+    if (adjustmentPointer.current !== event.pointerId || adjustmentFrame.current !== null) return;
+    adjustmentFrame.current = requestAnimationFrame(() => {
+      adjustmentFrame.current = null;
+      if (adjustmentPointer.current !== null) void window.desktop?.updateWindowAdjustment();
+    });
   }
 
   function stopWindowAdjustment(event: PointerEvent<HTMLElement>) {
     if (adjustmentPointer.current !== event.pointerId) return;
     adjustmentPointer.current = null;
+    if (adjustmentFrame.current !== null) {
+      cancelAnimationFrame(adjustmentFrame.current);
+      adjustmentFrame.current = null;
+    }
+    if (event.type === 'pointerup') void window.desktop?.updateWindowAdjustment();
     if (event.currentTarget.hasPointerCapture(event.pointerId)) event.currentTarget.releasePointerCapture(event.pointerId);
     void window.desktop?.stopWindowAdjustment();
   }
@@ -484,6 +544,7 @@ export default function App() {
     });
   }, [selectedDate, today, state.tasks, state.settings]);
 
+  const skin = skinImage(state.settings.imageSkin, localSkin);
   const backgroundAlpha = Math.round(state.settings.opacity / 100 * 255).toString(16).padStart(2, '0');
   const appStyle = {
     '--calendar-background': `${state.settings.backgroundColor}${backgroundAlpha}`,
@@ -504,8 +565,13 @@ export default function App() {
   } as CSSProperties;
 
   return (
-    <main className={`desktop-canvas ${isElectron ? 'is-electron' : 'is-web'}`}>
-      <section className={`calendar-shell ${isAdjusting ? 'is-adjusting' : ''} ${state.settings.blurEnabled ? '' : 'no-blur'} ${state.settings.showShadow ? 'with-shadow' : ''} ${showContent ? '' : 'content-hidden'} ${state.settings.showTitleBar ? '' : 'no-titlebar'}`} style={appStyle} aria-label="浮屿桌面月历">
+    <main className={`desktop-canvas ${isElectron ? (windowFocused ? 'is-electron has-focus' : 'is-electron') : 'is-web'}`}>
+      <section className={`calendar-shell ${isAdjusting ? 'is-adjusting' : ''} ${state.settings.blurEnabled && !skin ? '' : 'no-blur'} ${state.settings.showShadow ? 'with-shadow' : ''} ${showContent ? '' : 'content-hidden'} ${state.settings.showTitleBar ? '' : 'no-titlebar'}`} style={appStyle} aria-label="浮屿桌面月历">
+        {skin && <div className="calendar-skin" aria-hidden="true" style={{
+          backgroundImage: `linear-gradient(rgb(7 19 32 / ${state.settings.skinShade}%), rgb(7 19 32 / ${state.settings.skinShade}%)), url(${JSON.stringify(skin)})`,
+          backgroundPosition: state.settings.skinPosition,
+          opacity: state.settings.skinOpacity / 100,
+        }} />}
         {state.settings.showTitleBar && <header className="calendar-topbar" onPointerDown={(event) => startWindowAdjustment(event, 'move')} onPointerMove={updateWindowAdjustment} onPointerUp={stopWindowAdjustment} onPointerCancel={stopWindowAdjustment}>
           <div className="topbar-month-nav">
             <button type="button" className="topbar-arrow" aria-label="上个月" title="上个月" onClick={() => setMonthCursor((current) => addMonths(current, -1))}><ChevronLeft size={13} /></button>
@@ -521,7 +587,7 @@ export default function App() {
           <div className="window-menu-backdrop" aria-hidden="true" onPointerDown={() => setShowWindowMenu(false)} />
           <div className="window-function-menu" role="menu" aria-label="日历功能">
             <label className="window-menu-date"><CalendarDays size={15} /><span>选择日期</span><input type="month" aria-label="选择月份" value={monthCursor.slice(0, 7)} onChange={(event) => { if (event.target.value) setMonthCursor(`${event.target.value}-01`); }} /></label>
-            <button type="button" role="menuitem" onClick={openSettingsFromMenu}><Palette size={15} /><span>主题皮肤</span></button>
+            <button type="button" role="menuitem" onClick={() => { setShowWindowMenu(false); setShowSettings('appearance'); }}><Palette size={15} /><span>主题皮肤</span></button>
             <div className="window-menu-notes">
               <button type="button" role="menuitem" onClick={createNote}><Plus size={15} /><span>新建便签</span></button>
               <button type="button" role="menuitem" onClick={() => { setShowWindowMenu(false); setShowSettings('notes'); }}><StickyNoteIcon size={15} /><span>管理便签</span></button>
@@ -529,6 +595,7 @@ export default function App() {
             <button type="button" role="menuitem" className={isAdjusting ? 'is-active' : ''} disabled={!isElectron} onClick={toggleAdjustmentMode}><Move size={15} /><span>{isAdjusting ? '完成位置和大小调整' : '调整位置和大小'}</span>{isAdjusting && <Check size={14} />}</button>
             <button type="button" role="menuitem" disabled={!isElectron} onClick={() => { setShowWindowMenu(false); void window.desktop?.minimizeWindow(); }}><ChevronDown size={15} /><span>隐藏日历清单</span></button>
             <div className="window-menu-separator" />
+            {isElectron && <button type="button" role="menuitem" disabled={!isReady} onClick={() => { setShowWindowMenu(false); void syncCalendar(true); }}><RefreshCw size={15} /><span>立即同步</span></button>}
             <button type="button" role="menuitem" onClick={openSettingsFromMenu}><Settings2 size={15} /><span>日历设置</span></button>
             <button type="button" role="menuitem" disabled={!isElectron} onClick={() => void window.desktop?.quitApp()}><LogOut size={15} /><span>退出软件</span></button>
           </div>
@@ -620,7 +687,7 @@ export default function App() {
 
         {!isReady && <div className="loading-cover"><span /><p>正在整理你的日历…</p></div>}
         {editor && <DayEditorDialog date={editor.date} tasks={tasksByDate.get(editor.date) ?? []} initialTaskId={editor.taskId} settings={state.settings} onAutoSave={(tasks) => saveDayTasks(editor.date, tasks, false)} onSave={(tasks) => saveDayTasks(editor.date, tasks)} onCancelSeries={cancelTaskSeries} onClose={() => setEditor(null)} />}
-        {showSettings && <SettingsDialog initialCategory={showSettings === 'notes' ? 'notes' : 'calendar'} settings={state.settings} notes={state.notes} appState={state} isElectron={isElectron} onChange={updateSettings} onClose={() => setShowSettings(false)} onCreateNote={createNote} onOpenNote={openNote} onDestroyNote={destroyNote} onApplyRemote={applyRemoteState} />}
+        {showSettings && <SettingsDialog initialCategory={showSettings === true ? 'calendar' : showSettings} localSkin={localSkin} onLocalSkinChange={setLocalSkin} settings={state.settings} notes={state.notes} appState={state} isElectron={isElectron} onChange={updateSettings} onClose={() => setShowSettings(false)} onCreateNote={createNote} onOpenNote={openNote} onDestroyNote={destroyNote} onApplyRemote={applyRemoteState} syncStatus={syncStatus} onSyncStatusChange={setSyncStatus} syncConflict={syncConflict} onSyncConflictChange={setSyncConflict} />}
         {toast && <div className="toast" role="status"><ListChecks size={16} />{toast}</div>}
       </section>
     </main>

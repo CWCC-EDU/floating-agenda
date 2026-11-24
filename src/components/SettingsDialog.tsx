@@ -1,14 +1,17 @@
 import { useState, type CSSProperties, type KeyboardEvent, type ReactNode } from 'react';
 import { CalendarDays, ChevronRight, Cloud, Info, Keyboard, LayoutGrid, Monitor, RotateCcw, SlidersHorizontal, StickyNote as StickyNoteIcon, Type, X } from 'lucide-react';
 import { DEFAULT_SETTINGS } from '../lib/storage';
+import { importLocalSkin, skinImage, SKIN_OPTIONS } from '../lib/skins';
 import { SyncSettings } from './SyncSettings';
-import type { AppState, NutstoreSyncResult, BulletStyle, CalendarLayout, DesktopIconLayer, EditorInputStyle, FontFamily, Settings, SoundEffect, StickyNote, TextBackground, UpdateCheckResult } from '../types';
+import type { AppState, NutstoreRemoteSummary, NutstoreSyncResult, NutstoreSyncStatus, BulletStyle, CalendarLayout, DesktopIconLayer, EditorInputStyle, FontFamily, Settings, SkinPosition, SoundEffect, StickyNote, TextBackground, UpdateCheckResult } from '../types';
 
 type Category = 'calendar' | 'cells' | 'appearance' | 'notes' | 'sync' | 'advanced' | 'about';
 type ShortcutKey = 'showHideShortcut' | 'toggleContentShortcut' | 'toggleNotesShortcut' | 'completeTaskShortcut';
 
 interface SettingsDialogProps {
   initialCategory: Category;
+  localSkin: string | null;
+  onLocalSkinChange: (image: string) => void;
   settings: Settings;
   notes: StickyNote[];
   appState: AppState;
@@ -19,6 +22,10 @@ interface SettingsDialogProps {
   onOpenNote: (id: string) => void;
   onDestroyNote: (id: string) => void;
   onApplyRemote: (result: NutstoreSyncResult, expected: AppState) => Promise<NutstoreSyncResult>;
+  syncStatus: NutstoreSyncStatus | null;
+  onSyncStatusChange: (status: NutstoreSyncStatus) => void;
+  syncConflict: NutstoreRemoteSummary | null;
+  onSyncConflictChange: (summary: NutstoreRemoteSummary | null) => void;
 }
 
 const CATEGORIES = [
@@ -49,6 +56,10 @@ const EDITOR_STYLES: { value: EditorInputStyle; label: string }[] = [
 const DESKTOP_ICON_LAYERS: { value: DesktopIconLayer; label: string }[] = [
   { value: 'below', label: '日历在图标上方（默认）' },
   { value: 'above', label: '日历在图标下方' },
+];
+const SKIN_POSITIONS: { value: SkinPosition; label: string }[] = [
+  { value: 'center', label: '居中' }, { value: 'left', label: '左侧' }, { value: 'right', label: '右侧' },
+  { value: 'top', label: '顶部' }, { value: 'bottom', label: '底部' },
 ];
 const FONT_OPTIONS: { value: FontFamily; label: string }[] = [
   { value: 'Microsoft YaHei', label: '微软雅黑' },
@@ -83,7 +94,7 @@ function SelectRow<T extends string | number>({ title, description, value, optio
   title: string;
   description?: string;
   value: T;
-  options: { value: T; label: string }[];
+  options: readonly { value: T; label: string }[];
   disabled?: boolean;
   onChange: (value: T) => void;
 }) {
@@ -140,7 +151,7 @@ function Section({ title, children }: { title: string; children: ReactNode }) {
   return <section className="setting-section"><h3>{title}</h3>{children}</section>;
 }
 
-function ChoiceCards<T extends string>({ value, options, kind, onChange }: { value: T; options: { value: T; label: string }[]; kind: 'layout' | 'bullet'; onChange: (value: T) => void }) {
+function ChoiceCards<T extends string>({ value, options, kind, onChange }: { value: T; options: readonly { value: T; label: string }[]; kind: 'layout' | 'bullet'; onChange: (value: T) => void }) {
   return (
     <div className="setting-choice-grid">
       {options.map((option) => (
@@ -184,9 +195,12 @@ function ShortcutRow({ title, setting, value, disabled, onChange }: { title: str
   );
 }
 
-export function SettingsDialog({ initialCategory, settings, notes, appState, isElectron, onChange, onClose, onCreateNote, onOpenNote, onDestroyNote, onApplyRemote }: SettingsDialogProps) {
+export function SettingsDialog({ initialCategory, localSkin, onLocalSkinChange, settings, notes, appState, isElectron, onChange, onClose, onCreateNote, onOpenNote, onDestroyNote, onApplyRemote, syncStatus, onSyncStatusChange, syncConflict, onSyncConflictChange }: SettingsDialogProps) {
   const [category, setCategory] = useState<Category>(initialCategory);
   const [updateResult, setUpdateResult] = useState<UpdateCheckResult | null>(null);
+  const [skinError, setSkinError] = useState('');
+  const [importingSkin, setImportingSkin] = useState(false);
+  const previewSkin = skinImage(settings.imageSkin, localSkin);
   const update = (patch: Partial<Settings>) => onChange({ ...settings, ...patch });
   const updateShortcut = (setting: ShortcutKey, value: string) => update({ [setting]: value });
   const numberOptions = (min: number, max: number, unit = '') => Array.from({ length: max - min + 1 }, (_, index) => ({ value: min + index, label: `${min + index}${unit}` }));
@@ -280,6 +294,35 @@ export function SettingsDialog({ initialCategory, settings, notes, appState, isE
               </>}
 
               {category === 'appearance' && <>
+                <Section title="主题皮肤">
+                  <SelectRow title="日历背景" value={settings.imageSkin} options={SKIN_OPTIONS} onChange={(imageSkin) => update({ imageSkin })} />
+                  <label className="skin-import">
+                    <span>{importingSkin ? '正在处理图片…' : '导入本机图片'}</span>
+                    <input type="file" accept="image/jpeg,image/png,image/webp" disabled={importingSkin} onChange={async (event) => {
+                      const file = event.currentTarget.files?.[0];
+                      event.currentTarget.value = '';
+                      if (!file) return;
+                      setSkinError('');
+                      setImportingSkin(true);
+                      try {
+                        onLocalSkinChange(await importLocalSkin(file));
+                        update({ imageSkin: 'local' });
+                      } catch (error) {
+                        setSkinError(error instanceof Error ? error.message : '导入图片失败');
+                      } finally {
+                        setImportingSkin(false);
+                      }
+                    }} />
+                  </label>
+                  {skinError && <p className="skin-error" role="alert">{skinError}</p>}
+                  {settings.imageSkin === 'local' && !localSkin && <p className="skin-hint">选择一张本机图片即可启用该主题。</p>}
+                  {previewSkin && <img className="skin-preview" alt="主题图片预览" src={previewSkin} style={{ objectPosition: settings.skinPosition }} />}
+                  {settings.imageSkin !== 'none' && <>
+                    <SelectRow title="图片对齐" value={settings.skinPosition} options={SKIN_POSITIONS} onChange={(skinPosition) => update({ skinPosition })} />
+                    <RangeRow title="图片不透明度" value={settings.skinOpacity} min={10} max={100} unit="%" onChange={(skinOpacity) => update({ skinOpacity })} />
+                    <RangeRow title="图片压暗" value={settings.skinShade} min={0} max={85} unit="%" onChange={(skinShade) => update({ skinShade })} />
+                  </>}
+                </Section>
                 <Section title="文字的字体颜色和大小">
                   <FontRow title="日历日期" family={settings.calendarFontFamily} size={settings.calendarFontSize} color={settings.calendarTextColor} onFamily={(calendarFontFamily) => update({ calendarFontFamily })} onSize={(calendarFontSize) => update({ calendarFontSize })} onColor={(calendarTextColor) => update({ calendarTextColor })} />
                   <FontRow title="编辑内容" family={settings.editorFontFamily} size={settings.editorFontSize} color={settings.editorTextColor} onFamily={(editorFontFamily) => update({ editorFontFamily })} onSize={(editorFontSize) => update({ editorFontSize })} onColor={(editorTextColor) => update({ editorTextColor })} />
@@ -336,7 +379,7 @@ export function SettingsDialog({ initialCategory, settings, notes, appState, isE
 
               </>}
 
-              {category === 'sync' && <SyncSettings appState={appState} onApplyRemote={onApplyRemote} />}
+              {category === 'sync' && <SyncSettings appState={appState} onApplyRemote={onApplyRemote} status={syncStatus} onStatusChange={onSyncStatusChange} conflict={syncConflict} onConflictChange={onSyncConflictChange} />}
 
               {category === 'advanced' && <>
                 <Section title="高级设置">

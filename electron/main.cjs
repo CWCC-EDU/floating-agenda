@@ -720,6 +720,33 @@ if (!hasSingleInstanceLock) {
   });
 }
 
+const themeFile = () => path.join(app.getPath('userData'), 'theme-image.jpg');
+const themeDataUrl = (bytes) => 'data:image/jpeg;base64,' + bytes.toString('base64');
+
+ipcMain.handle('theme:load', async (event) => {
+  if (event.sender !== mainWindow?.webContents) return null;
+  try {
+    const bytes = await fs.readFile(themeFile());
+    return bytes.length <= 5 * 1024 * 1024 ? themeDataUrl(bytes) : null;
+  } catch (error) {
+    if (error.code === 'ENOENT') return null;
+    throw error;
+  }
+});
+
+ipcMain.handle('theme:save', async (event, bytes) => {
+  if (event.sender !== mainWindow?.webContents || !(bytes instanceof Uint8Array)
+      || bytes.length < 4 || bytes.length > 5 * 1024 * 1024 || bytes[0] !== 255 || bytes[1] !== 216) {
+    throw new Error('无法保存主题图片');
+  }
+  const content = Buffer.from(bytes);
+  const target = themeFile();
+  const temp = target + '.tmp';
+  await fs.writeFile(temp, content);
+  await fs.rename(temp, target);
+  return themeDataUrl(content);
+});
+
 ipcMain.handle('state:load', async () => {
   try {
     return JSON.parse(await fs.readFile(statePath(), 'utf8'));
@@ -915,6 +942,7 @@ ipcMain.handle('sync:status', () => nutstore.getStatus());
 ipcMain.handle('sync:connect', (_event, payload) => nutstore.connect(payload && typeof payload === 'object' ? payload : {}));
 ipcMain.handle('sync:disconnect', () => nutstore.disconnect());
 ipcMain.handle('sync:auto', (_event, enabled) => nutstore.setAutoSync(enabled === true));
+ipcMain.handle('sync:interval', (_event, intervalMinutes) => nutstore.setSyncInterval(intervalMinutes));
 ipcMain.handle('sync:now', (_event, state, options) => nutstore.syncNow(state, options && typeof options === 'object' ? options : {}));
 
 ipcMain.handle('sync:finish-pull', async (_event, id, state) => {

@@ -55,6 +55,10 @@ export const DEFAULT_SETTINGS: Settings = {
   editorFontSize: 12,
   editorTextColor: '#eef6f4',
   editorInputStyle: 'one-box',
+  imageSkin: 'none',
+  skinPosition: 'center',
+  skinOpacity: 85,
+  skinShade: 50,
   desktopIconLayer: 'below',
   restDayBackgroundColor: '#23382f',
   titleButtonColor: '#d7e9a7',
@@ -188,6 +192,10 @@ export function normalizeAppState(value: unknown): AppState {
   settings.editorFontFamily = enumValue(raw.editorFontFamily, ['Microsoft YaHei', 'Segoe UI', 'PingFang SC', 'SimSun'] as const, settings.editorFontFamily);
   settings.noteFontFamily = enumValue(raw.noteFontFamily, ['Microsoft YaHei', 'Segoe UI', 'PingFang SC', 'SimSun'] as const, settings.noteFontFamily);
   settings.editorInputStyle = enumValue(raw.editorInputStyle, ['one-box', 'multi-row'] as const, settings.editorInputStyle);
+  settings.imageSkin = enumValue(raw.imageSkin, ['none', 'coast', 'earth', 'local'] as const, settings.imageSkin);
+  settings.skinPosition = enumValue(raw.skinPosition, ['center', 'left', 'right', 'top', 'bottom'] as const, settings.skinPosition);
+  settings.skinOpacity = numberInRange(raw.skinOpacity, 10, 100, settings.skinOpacity);
+  settings.skinShade = numberInRange(raw.skinShade, 0, 85, settings.skinShade);
   settings.desktopIconLayer = enumValue(raw.desktopIconLayer, ['above', 'below'] as const, settings.desktopIconLayer);
   const savedRevision = typeof raw.settingsRevision === 'number' ? raw.settingsRevision : 0;
   if (savedRevision < 3 && settings.showNotes) {

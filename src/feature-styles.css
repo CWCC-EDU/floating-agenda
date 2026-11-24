@@ -315,3 +315,43 @@ select { font: inherit; }
 .sync-security code { padding: 1px 4px; border-radius: 3px; color: #52666e; background: #eef3f5; font-family: inherit; font-size: 8px; }
 @keyframes sync-spin { to { transform: rotate(360deg); } }
 .sync-primary .is-spinning { animation: sync-spin 1s linear infinite; }
+
+.calendar-shell { isolation: isolate; }
+.calendar-skin {
+  position: absolute;
+  z-index: -1;
+  inset: 0;
+  pointer-events: none;
+  background-repeat: no-repeat;
+  background-size: cover;
+}
+.is-electron:not(.has-focus) .calendar-shell,
+.is-electron .modal-backdrop,
+.is-electron .window-function-menu,
+.is-electron .toast,
+.note-window-root .notes-panel {
+  backdrop-filter: none;
+  -webkit-backdrop-filter: none;
+}
+.window-function-menu { animation: menu-in 160ms cubic-bezier(.22,.75,.25,1) both; }
+@keyframes menu-in {
+  from { opacity: 0; transform: translateY(-3px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+
+.skin-import {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin: 8px 0;
+  font-size: 10px;
+}
+.skin-import input { max-width: 100%; font: inherit; }
+.skin-preview { display: block; width: 100%; height: 98px; margin: 7px 0; object-fit: cover; border-radius: 6px; }
+.skin-error, .skin-hint { margin: 5px 0; font-size: 10px; }
+.skin-error { color: #a53434; }
+
+@media (prefers-reduced-motion: reduce) {
+  .desktop-canvas *, .note-window-root * { animation-duration: .01ms !important; transition-duration: .01ms !important; }
+}

@@ -8,6 +8,8 @@ const REMOTE_DIR_NAME = 'floating-agenda';
 const REMOTE_FILE_NAME = 'floating-agenda.json';
 const REQUEST_TIMEOUT_MS = 15_000;
 const MAX_BACKUPS = 20;
+const DEFAULT_SYNC_INTERVAL_MINUTES = 5;
+const SYNC_INTERVAL_OPTIONS = [1, 5, 10, 15, 30, 60];
 
 let files = null;
 let configCache = null;
@@ -58,6 +60,7 @@ function readConfig() {
       email: parsed.email,
       password: parsed.password,
       autoSync: parsed.autoSync !== false,
+      intervalMinutes: SYNC_INTERVAL_OPTIONS.includes(parsed.intervalMinutes) ? parsed.intervalMinutes : DEFAULT_SYNC_INTERVAL_MINUTES,
     };
   } catch {
     configCache = null;
@@ -106,6 +109,8 @@ function getStatus() {
     configured: Boolean(config),
     email: config ? config.email : '',
     autoSync: config ? config.autoSync : false,
+    intervalMinutes: config?.intervalMinutes ?? DEFAULT_SYNC_INTERVAL_MINUTES,
+    intervalOptions: SYNC_INTERVAL_OPTIONS,
     encryptionAvailable: safeStorage.isEncryptionAvailable(),
     remoteLocation: remoteLocation(),
     lastSyncAt: status.lastSyncAt || null,
@@ -425,10 +430,12 @@ async function connect({ email, appPassword, autoSync }) {
   if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(trimmedEmail)) return { ok: false, message: '邮箱格式不正确', status: getStatus() };
   if (!password) return { ok: false, message: '请填写坚果云应用密码', status: getStatus() };
   if (!safeStorage.isEncryptionAvailable()) return { ok: false, message: '当前系统无法加密保存密码，未连接', status: getStatus() };
-  const config = { email: trimmedEmail, password, autoSync: autoSync !== false };
+  const config = { email: trimmedEmail, password, autoSync: autoSync !== false, intervalMinutes: DEFAULT_SYNC_INTERVAL_MINUTES };
   try {
     await verifyCredentials(config);
-    const accountChanged = readConfig()?.email !== config.email;
+    const previous = readConfig();
+    const accountChanged = previous?.email !== config.email;
+    if (!accountChanged) config.intervalMinutes = previous.intervalMinutes;
     writeConfig(config);
     if (accountChanged) {
       updateStatus({ lastLocalHash: null, lastRemoteHash: null, lastSyncAt: null, remoteSavedAt: null });
@@ -454,16 +461,26 @@ function disconnect() {
   return { ok: true, message: '已断开坚果云，云端数据不会被删除', status: getStatus() };
 }
 
-function setAutoSync(enabled) {
+function updateSyncPreferences(patch, message) {
   const config = readConfig();
   if (!config) return { ok: false, message: '还没有连接坚果云', status: getStatus() };
-  const next = { ...config, autoSync: enabled === true };
   try {
-    writeConfig(next);
+    writeConfig({ ...config, ...patch });
   } catch (error) {
     return { ok: false, message: error.message || '保存设置失败', status: getStatus() };
   }
-  return { ok: true, message: enabled ? '已开启自动同步' : '已关闭自动同步', status: getStatus() };
+  return { ok: true, message, status: getStatus() };
+}
+
+function setAutoSync(enabled) {
+  return updateSyncPreferences({ autoSync: enabled === true }, enabled ? '已开启自动同步' : '已关闭自动同步');
+}
+
+function setSyncInterval(intervalMinutes) {
+  if (!SYNC_INTERVAL_OPTIONS.includes(intervalMinutes)) {
+    return { ok: false, message: '请选择列表中的同步间隔', status: getStatus() };
+  }
+  return updateSyncPreferences({ intervalMinutes }, `已设为每 ${intervalMinutes} 分钟检查云端更新`);
 }
 
 module.exports = {
@@ -472,6 +489,7 @@ module.exports = {
   connect,
   disconnect,
   setAutoSync,
+  setSyncInterval,
   syncNow,
   finishPull,
   hasPendingPull: (id) => Boolean(pendingPull && pendingPull.id === id),

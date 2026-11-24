@@ -11,7 +11,6 @@ using System.Threading.Tasks;
 using Accessibility;
 
 public static class AgendaDesktopOrder {
-    private const uint GW_HWNDPREV = 3;
     private const int GWL_EXSTYLE = -20;
     private const long WS_EX_TOPMOST = 0x00000008;
     private const uint PositionOnly = 0x4213; // No size, move, activation or owner changes. Use an async request.
@@ -118,8 +117,7 @@ public static class AgendaDesktopOrder {
     [DllImport("dwmapi.dll")]
     private static extern int DwmGetWindowAttribute(IntPtr hwnd, uint attribute, out Rect value, int size);
 
-    private static bool TryGetApplicationBounds(IntPtr hwnd, out Rect bounds) {
-        bounds = new Rect();
+    private static bool IsApplicationWindow(IntPtr hwnd) {
         if (!IsWindowVisible(hwnd) || IsIconic(hwnd)) return false;
         int cloaked;
         if (DwmGetWindowAttribute(hwnd, 14, out cloaked, sizeof(int)) == 0 && cloaked != 0) return false;
@@ -132,6 +130,10 @@ public static class AgendaDesktopOrder {
             case "Shell_SecondaryTrayWnd":
                 return false;
         }
+        return true;
+    }
+
+    private static bool TryGetApplicationBounds(IntPtr hwnd, out Rect bounds) {
         if (DwmGetWindowAttribute(hwnd, 9, out bounds, Marshal.SizeOf(typeof(Rect))) != 0
             && !GetWindowRect(hwnd, out bounds)) return false;
         return bounds.Left < bounds.Right && bounds.Top < bounds.Bottom;
@@ -148,6 +150,7 @@ public static class AgendaDesktopOrder {
     }
 
     private static void SetCalendarRegion(IntPtr hwnd, bool iconsAbove, List<Rect> applications) {
+        if ((!iconsAbove || icons.Length == 0) && applications.Count == 0 && !Regions.ContainsKey(hwnd)) return;
         Rect bounds;
         if (!GetWindowRect(hwnd, out bounds)) return;
         var cuts = new List<Rect>();
@@ -222,35 +225,45 @@ public static class AgendaDesktopOrder {
         int desktop = order.IndexOf(desktopHost);
         if (desktop < 0) return;
         IntPtr after = IntPtr.Zero;
-        var applications = new List<Rect>();
-        for (int i = 0; i < desktop; i++) {
-            IntPtr hwnd = order[i];
-            Rect bounds;
-            if (widgets.Contains(hwnd) || !TryGetApplicationBounds(hwnd, out bounds)) continue;
-            if (!IsTopmost(hwnd)) after = hwnd;
-            applications.Add(bounds);
-        }
+        int afterIndex = -1;
+        int calendarIndex = order.IndexOf(calendar);
         var visibleWidgets = Array.FindAll(windows, hwnd => IsWindowVisible(hwnd) && !IsIconic(hwnd));
         bool desktopForeground = foreground != IntPtr.Zero && (foreground == shell || foreground == desktopHost);
         bool usingDesktop = desktopForeground || (desktopPresentation == calendar && widgets.Contains(foreground));
-        bool overlapsApplication = Array.Exists(visibleWidgets, hwnd => {
+        bool checkLift = calendar != IntPtr.Zero && usingDesktop
+            && Array.Exists(visibleWidgets, hwnd => IsTopmost(hwnd) || order.IndexOf(hwnd) > desktop);
+        var applications = new List<Rect>();
+        var coveringCalendar = new List<Rect>();
+        for (int i = 0; i < desktop; i++) {
+            IntPtr hwnd = order[i];
+            if (widgets.Contains(hwnd) || !IsApplicationWindow(hwnd)) continue;
+            if (!IsTopmost(hwnd)) {
+                after = hwnd;
+                afterIndex = i;
+            }
+
+            // A window already above the calendar is occluded by Windows.
+            // Its moving bounds cannot change the calendar's own region.
+            bool needsCut = calendarIndex >= 0 && i > calendarIndex;
+            Rect bounds;
+            if ((needsCut || checkLift) && TryGetApplicationBounds(hwnd, out bounds)) {
+                if (checkLift) applications.Add(bounds);
+                if (needsCut) coveringCalendar.Add(bounds);
+            }
+        }
+        bool liftWidgets = checkLift && !Array.Exists(visibleWidgets, hwnd => {
             Rect bounds;
             return GetWindowRect(hwnd, out bounds) && applications.Exists(rect =>
                 rect.Left < bounds.Right && rect.Right > bounds.Left
                 && rect.Top < bounds.Bottom && rect.Bottom > bounds.Top);
         });
-        bool liftWidgets = calendar != IntPtr.Zero && usingDesktop && !overlapsApplication
-            && Array.Exists(visibleWidgets, hwnd => IsTopmost(hwnd) || order.IndexOf(hwnd) > desktop);
         desktopPresentation = liftWidgets ? calendar : IntPtr.Zero;
-
         if (calendar != IntPtr.Zero) {
             Rect bounds;
             if (order.IndexOf(foreground) > desktop && !widgets.Contains(foreground)
-                && TryGetApplicationBounds(foreground, out bounds))
-                applications.Add(bounds);
-
-            // Notes are composited over the intact calendar by the window manager.
-            SetCalendarRegion(calendar, iconsAbove, applications);
+                && IsApplicationWindow(foreground) && TryGetApplicationBounds(foreground, out bounds))
+                coveringCalendar.Add(bounds);
+            SetCalendarRegion(calendar, iconsAbove, coveringCalendar);
         }
 
         if (liftWidgets) {
@@ -270,13 +283,17 @@ public static class AgendaDesktopOrder {
             return;
         }
 
+        bool moved = false;
         foreach (IntPtr hwnd in visibleWidgets) {
-            if (IsTopmost(hwnd)) SetWindowPos(hwnd, NotTopmost, 0, 0, 0, 0, PositionOnly);
-            IntPtr previous = GetWindow(hwnd, GW_HWNDPREV);
-            while (previous != IntPtr.Zero && !IsWindowVisible(previous)) previous = GetWindow(previous, GW_HWNDPREV);
-            if (previous != after)
+            int index = order.IndexOf(hwnd);
+            bool topmost = IsTopmost(hwnd);
+            if (topmost) SetWindowPos(hwnd, NotTopmost, 0, 0, 0, 0, PositionOnly);
+            if (moved || topmost || index <= afterIndex || index >= desktop) {
                 SetWindowPos(hwnd, after, 0, 0, 0, 0, PositionOnly);
+                moved = true;
+            }
             after = hwnd;
+            afterIndex = index;
         }
     }
 }
