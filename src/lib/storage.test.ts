@@ -49,13 +49,36 @@ describe('state normalization', () => {
   it('migrates the legacy auto icon layer to below only once', () => {
     const legacy = normalizeAppState({ settings: { desktopIconLayer: 'auto' } });
     expect(legacy.settings.desktopIconLayer).toBe('below');
-    expect(legacy.settings.settingsRevision).toBe(2);
+    expect(legacy.settings.settingsRevision).toBe(3);
 
     const explicit = normalizeAppState({ settings: { desktopIconLayer: 'auto', settingsRevision: 2 } });
     expect(explicit.settings.desktopIconLayer).toBe('auto');
 
     const above = normalizeAppState({ settings: { desktopIconLayer: 'above' } });
     expect(above.settings.desktopIconLayer).toBe('above');
-    expect(above.settings.settingsRevision).toBe(2);
+    expect(above.settings.settingsRevision).toBe(3);
+  });
+
+  it('opens legacy notes only when the old notes panel was visible', () => {
+    const visible = normalizeAppState({ notes: [{ id: 'a', text: 'A' }], settings: { showNotes: true } });
+    expect(visible.notes[0].open).toBe(true);
+
+    const hidden = normalizeAppState({ notes: [{ id: 'b', text: 'B' }], settings: { showNotes: false } });
+    expect(hidden.notes[0].open).toBe(false);
+
+    const explicit = normalizeAppState({ notes: [{ id: 'c', text: 'C', open: false }], settings: { showNotes: true, settingsRevision: 3 } });
+    expect(explicit.notes[0].open).toBe(false);
+  });
+
+  it('normalizes rollover highlight and ghost settings', () => {
+    const state = normalizeAppState({ settings: { rolloverHighlightEnabled: true, rolloverHighlightColor: '#123456', rolloverGhostEnabled: true } });
+    expect(state.settings.rolloverHighlightEnabled).toBe(true);
+    expect(state.settings.rolloverHighlightColor).toBe('#123456');
+    expect(state.settings.rolloverGhostEnabled).toBe(true);
+
+    const fallback = normalizeAppState({ settings: { rolloverHighlightColor: 'red' } });
+    expect(fallback.settings.rolloverHighlightColor).toBe(DEFAULT_SETTINGS.rolloverHighlightColor);
+    expect(fallback.settings.rolloverHighlightEnabled).toBe(false);
+    expect(fallback.settings.rolloverGhostEnabled).toBe(false);
   });
 });

@@ -3,6 +3,7 @@ const { spawn } = require('node:child_process');
 const fs = require('node:fs/promises');
 const fsSync = require('node:fs');
 const path = require('node:path');
+const nutstore = require('./nutstore.cjs');
 
 let mainWindow = null;
 let tray = null;
@@ -28,16 +29,23 @@ let interactionHold = false;
 let integrationSignature = '';
 let focusHelper = null;
 let helperBuffer = '';
-let foregroundWaiter = null;
-let desktopDetached = false;
-let detachedAt = 0;
-let detachedWatch = null;
-let foregroundProbe = false;
 let contextMenuOpen = false;
+const foregroundWaiters = new Map();
+const liftStates = new Map();
 const desktopLayer = { raised: null, summon: false, timer: null, ticks: 0, styleThrough: null, styleBleed: null };
+let notesSync = { notes: [], appearance: null };
+const noteWindows = new Map();
+const closingNoteIds = new Set();
+let noteBoundsCache = null;
+let noteDrag = null;
+let notesSuppressed = false;
 
+const NOTES_WIDTH = 296;
+const NOTES_MIN_HEIGHT = 120;
+const NOTES_MAX_HEIGHT = 620;
 const statePath = () => path.join(app.getPath('userData'), 'floating-agenda.json');
 const windowBoundsPath = () => path.join(app.getPath('userData'), 'window-bounds.json');
+const notesBoundsPath = () => path.join(app.getPath('userData'), 'notes-bounds.json');
 const iconPath = () => path.join(__dirname, '..', 'build', 'icon.png');
 
 function loadWindowBounds(workArea) {
@@ -96,11 +104,12 @@ function logDesktop(message) {
   }
 }
 
-function attachToDesktop(forceShow = false) {
-  if (process.platform !== 'win32' || !mainWindow || mainWindow.isDestroyed()) return;
-  const handle = mainWindow.getNativeWindowHandle().readBigUInt64LE(0).toString();
+function attachToDesktop(forceShow = false, win = mainWindow) {
+  if (process.platform !== 'win32' || !win || win.isDestroyed()) return;
+  const isMain = win === mainWindow;
+  const handle = win.getNativeWindowHandle().readBigUInt64LE(0).toString();
   const placeAboveIcons = desktopLayer.raised !== false;
-  const wantVisible = forceShow || mainWindow.isVisible();
+  const wantVisible = forceShow || win.isVisible();
   const command = `
     Add-Type -TypeDefinition 'using System; using System.Runtime.InteropServices; using System.Text; public static class DesktopHost {
       [DllImport("user32.dll", SetLastError = true, CharSet = CharSet.Unicode)]
@@ -188,16 +197,16 @@ function attachToDesktop(forceShow = false) {
   let stderr = '';
   child.stdout.on('data', (data) => { stdout += data.toString(); });
   child.stderr.on('data', (data) => { stderr += data.toString(); });
-  child.on('error', (error) => console.error('Unable to attach calendar to desktop:', error));
+  child.on('error', (error) => console.error('Unable to attach window to desktop:', error));
   child.on('close', (code) => {
     const ok = code === 0 && stdout.includes('ATTACHED');
-    if (!attachLogged) {
+    if (isMain && !attachLogged) {
       attachLogged = true;
       logDesktop(`${ok ? 'attach' : 'attach-failed'} mode=${latestSettings.desktopIconLayer} wantVisible=${wantVisible} code=${code} out=${stdout.trim()} err=${stderr.trim()}`);
     }
     if (!ok) {
       console.error('Desktop attachment failed:', stderr || stdout || `exit ${code}`);
-      putWindowAtDesktopBottom();
+      if (isMain) putWindowAtDesktopBottom();
     }
   });
 }
@@ -289,7 +298,8 @@ const FOCUS_HELPER_SCRIPT = `
         Write-Output 'ok'
       } elseif ($line.StartsWith('fg:')) {
         $target = [IntPtr]::new([int64]$line.Substring(3));
-        if ([FocusGrant]::GetForegroundWindow() -eq $target) { Write-Output 'fg:1' } else { Write-Output 'fg:0' }
+        $flag = if ([FocusGrant]::GetForegroundWindow() -eq $target) { '1' } else { '0' }
+        Write-Output ('fg:' + $target.ToString() + ':' + $flag)
       } elseif ($line.StartsWith('detach:')) {
         $target = [IntPtr]::new([int64]$line.Substring(7));
         $parent = [FocusGrant]::GetParent($target);
@@ -362,10 +372,13 @@ function ensureFocusHelper() {
     while ((index = helperBuffer.indexOf('\n')) >= 0) {
       const line = helperBuffer.slice(0, index).trim();
       helperBuffer = helperBuffer.slice(index + 1);
-      if (line.startsWith('fg:') && foregroundWaiter) {
-        const waiter = foregroundWaiter;
-        foregroundWaiter = null;
-        waiter(line === 'fg:1');
+      if (line.startsWith('fg:')) {
+        const [, handle, flag] = line.split(':');
+        const waiter = foregroundWaiters.get(handle);
+        if (waiter) {
+          foregroundWaiters.delete(handle);
+          waiter(flag === '1');
+        }
       } else if (line.startsWith('err:')) {
         logDesktop(`focus helper error ${line.slice(4)}`);
       }
@@ -381,11 +394,11 @@ function ensureFocusHelper() {
   return child;
 }
 
-function grantOsFocus() {
-  if (process.platform !== 'win32' || !mainWindow || mainWindow.isDestroyed()) return;
+function grantOsFocus(win = mainWindow) {
+  if (process.platform !== 'win32' || !win || win.isDestroyed()) return;
   const helper = ensureFocusHelper();
   if (!helper || helper.stdin.destroyed) return;
-  const handle = mainWindow.getNativeWindowHandle().readBigUInt64LE(0).toString();
+  const handle = win.getNativeWindowHandle().readBigUInt64LE(0).toString();
   try {
     helper.stdin.write(`focus:${handle}\n`);
   } catch {
@@ -393,11 +406,11 @@ function grantOsFocus() {
   }
 }
 
-function sendDesktopCommand(command) {
-  if (process.platform !== 'win32' || !mainWindow || mainWindow.isDestroyed()) return;
+function sendDesktopCommand(command, win = mainWindow) {
+  if (process.platform !== 'win32' || !win || win.isDestroyed()) return;
   const helper = ensureFocusHelper();
   if (!helper || helper.stdin.destroyed) return;
-  const handle = mainWindow.getNativeWindowHandle().readBigUInt64LE(0).toString();
+  const handle = win.getNativeWindowHandle().readBigUInt64LE(0).toString();
   try {
     helper.stdin.write(`${command}:${handle}\n`);
   } catch {
@@ -405,12 +418,22 @@ function sendDesktopCommand(command) {
   }
 }
 
+function getLiftState(win) {
+  if (!win) return null;
+  let state = liftStates.get(win.id);
+  if (!state) {
+    state = { detached: false, at: 0, watch: null, probe: false };
+    liftStates.set(win.id, state);
+  }
+  return state;
+}
+
 // IME composition needs a real foreground top-level window; a WS_CHILD parented to
 // Progman never receives an input context, so lift the window out of the desktop
 // while the user is typing and embed it again once another window takes focus.
-function isWindowForeground() {
+function isWindowForeground(win) {
   return new Promise((resolve) => {
-    if (process.platform !== 'win32' || !mainWindow || mainWindow.isDestroyed()) {
+    if (process.platform !== 'win32' || !win || win.isDestroyed()) {
       resolve(true);
       return;
     }
@@ -419,67 +442,66 @@ function isWindowForeground() {
       resolve(true);
       return;
     }
-    if (foregroundWaiter) {
-      const previous = foregroundWaiter;
-      foregroundWaiter = null;
+    const handle = win.getNativeWindowHandle().readBigUInt64LE(0).toString();
+    const previous = foregroundWaiters.get(handle);
+    if (previous) {
+      foregroundWaiters.delete(handle);
       previous(true);
     }
     let settled = false;
-    foregroundWaiter = (value) => {
+    const finish = (value) => {
       if (settled) return;
       settled = true;
+      if (foregroundWaiters.get(handle) === finish) foregroundWaiters.delete(handle);
       resolve(value);
     };
-    const handle = mainWindow.getNativeWindowHandle().readBigUInt64LE(0).toString();
+    foregroundWaiters.set(handle, finish);
     try {
       helper.stdin.write(`fg:${handle}\n`);
     } catch {
       focusHelper = null;
-      foregroundWaiter = null;
-      resolve(true);
+      finish(true);
       return;
     }
-    setTimeout(() => {
-      if (settled) return;
-      settled = true;
-      foregroundWaiter = null;
-      resolve(true);
-    }, 900);
+    setTimeout(() => finish(true), 900);
   });
 }
 
-function stopDetachedWatch() {
-  if (detachedWatch) clearInterval(detachedWatch);
-  detachedWatch = null;
+function stopDetachedWatch(win) {
+  const state = win ? getLiftState(win) : null;
+  if (state?.watch) clearInterval(state.watch);
+  if (state) state.watch = null;
 }
 
-function startDetachedWatch() {
-  if (detachedWatch) return;
-  detachedWatch = setInterval(async () => {
-    if (!desktopDetached || !mainWindow || mainWindow.isDestroyed()) {
-      stopDetachedWatch();
+function startDetachedWatch(win) {
+  const state = getLiftState(win);
+  if (!state || state.watch) return;
+  state.watch = setInterval(async () => {
+    if (!state.detached || !win || win.isDestroyed()) {
+      stopDetachedWatch(win);
       return;
     }
-    if (foregroundProbe || contextMenuOpen || Date.now() - detachedAt < 1200) return;
-    foregroundProbe = true;
-    const foreground = await isWindowForeground();
-    foregroundProbe = false;
-    if (foreground || !desktopDetached || !mainWindow || mainWindow.isDestroyed()) return;
-    desktopDetached = false;
-    stopDetachedWatch();
-    logDesktop('reattach after focus loss');
-    attachToDesktop(mainWindow.isVisible());
-    updateDesktopLayer();
+    if (state.probe || contextMenuOpen || Date.now() - state.at < 1200) return;
+    state.probe = true;
+    const foreground = await isWindowForeground(win);
+    state.probe = false;
+    if (foreground || !state.detached || win.isDestroyed()) return;
+    state.detached = false;
+    stopDetachedWatch(win);
+    logDesktop(`reattach after focus loss win=${win.id}`);
+    attachToDesktop(win.isVisible(), win);
+    if (win === mainWindow) updateDesktopLayer();
   }, 800);
 }
 
-function liftWindowForInput() {
-  if (process.platform !== 'win32' || !mainWindow || mainWindow.isDestroyed()) return false;
-  if (!desktopDetached) {
-    desktopDetached = true;
-    detachedAt = Date.now();
+function liftWindowForInput(win = mainWindow) {
+  if (process.platform !== 'win32' || !win || win.isDestroyed()) return false;
+  const state = getLiftState(win);
+  if (!state.detached) {
+    state.detached = true;
+    state.at = Date.now();
     const helper = ensureFocusHelper();
-    const handle = mainWindow.getNativeWindowHandle().readBigUInt64LE(0).toString();
+    const handle = win.getNativeWindowHandle().readBigUInt64LE(0).toString();
     if (helper && !helper.stdin.destroyed) {
       try {
         helper.stdin.write(`detach:${handle}\n`);
@@ -487,20 +509,31 @@ function liftWindowForInput() {
         focusHelper = null;
       }
     }
-    logDesktop(`lift for input hwnd=${handle}`);
+    logDesktop(`lift for input hwnd=${handle} win=${win.id}`);
   }
-  startDetachedWatch();
-  if (!mainWindow.isVisible()) mainWindow.show();
-  mainWindow.focus();
-  mainWindow.webContents.focus();
-  grantOsFocus();
-  return desktopDetached;
+  startDetachedWatch(win);
+  if (!win.isVisible()) win.show();
+  win.focus();
+  win.webContents.focus();
+  grantOsFocus(win);
+  return state.detached;
+}
+
+function desktopWindows() {
+  const windows = [];
+  if (mainWindow && !mainWindow.isDestroyed()) windows.push(mainWindow);
+  noteWindows.forEach((win) => {
+    if (win && !win.isDestroyed()) windows.push(win);
+  });
+  return windows;
 }
 
 function setDesktopLayer(raised) {
   if (desktopLayer.raised === raised) return;
   desktopLayer.raised = raised;
-  sendDesktopCommand(raised ? 'raise' : 'lower');
+  desktopWindows().forEach((win) => {
+    if (win.isVisible()) sendDesktopCommand(raised ? 'raise' : 'lower', win);
+  });
 }
 
 function setDesktopStyles(through, bleed, force = false) {
@@ -528,15 +561,19 @@ function updateDesktopLayer() {
     setDesktopStyles(false, false);
     return;
   }
-  if (desktopDetached) {
+  if (getLiftState(mainWindow)?.detached || desktopWindows().some((win) => getLiftState(win)?.detached)) {
     setDesktopStyles(false, false);
     return;
   }
   desktopLayer.ticks = (desktopLayer.ticks + 1) % 50;
   const force = desktopLayer.ticks === 0;
   const point = screen.getCursorScreenPoint();
-  const bounds = mainWindow.getBounds();
-  const inside = point.x >= bounds.x && point.x < bounds.x + bounds.width && point.y >= bounds.y && point.y < bounds.y + bounds.height;
+  const containsPoint = (win) => {
+    if (!win || win.isDestroyed() || !win.isVisible()) return false;
+    const bounds = win.getBounds();
+    return point.x >= bounds.x && point.x < bounds.x + bounds.width && point.y >= bounds.y && point.y < bounds.y + bounds.height;
+  };
+  const inside = desktopWindows().some(containsPoint);
   if (latestSettings.desktopIconLayer === 'above') {
     desktopLayer.summon = false;
     setDesktopLayer(interactionHold);
@@ -560,8 +597,9 @@ function startDesktopLayerWatch() {
 
 function presentWindow(focus = true) {
   if (!mainWindow) return;
-  desktopDetached = false;
-  stopDetachedWatch();
+  const state = getLiftState(mainWindow);
+  state.detached = false;
+  stopDetachedWatch(mainWindow);
   if (mainWindow.isMinimized()) mainWindow.restore();
   if (focus) mainWindow.show();
   else mainWindow.showInactive();
@@ -574,6 +612,8 @@ function presentWindow(focus = true) {
   }
   attachToDesktop(true);
   updateDesktopLayer();
+  notesSuppressed = false;
+  showOpenNoteWindows();
 }
 
 function showWindow() {
@@ -583,12 +623,15 @@ function showWindow() {
 function minimizeWindow() {
   adjustment = null;
   desktopLayer.summon = false;
-  desktopDetached = false;
-  stopDetachedWatch();
+  const state = getLiftState(mainWindow);
+  state.detached = false;
+  stopDetachedWatch(mainWindow);
   setDesktopStyles(false, false);
   mainWindow?.setResizable(false);
   mainWindow?.hide();
   sendDesktopCommand('hide');
+  notesSuppressed = true;
+  hideAllNoteWindows();
 }
 
 function toggleWindow() {
@@ -604,6 +647,330 @@ function sendMenuAction(action) {
   const deliver = () => mainWindow?.webContents.send('menu:action', action);
   if (mainWindow.webContents.isLoading()) mainWindow.webContents.once('did-finish-load', deliver);
   else deliver();
+}
+
+function postMenuAction(action) {
+  if (!mainWindow || mainWindow.isDestroyed()) return;
+  const deliver = () => mainWindow?.webContents.send('menu:action', action);
+  if (mainWindow.webContents.isLoading()) mainWindow.webContents.once('did-finish-load', deliver);
+  else deliver();
+}
+
+function clampNoteBounds(bounds) {
+  const display = screen.getDisplayNearestPoint({
+    x: Math.round(bounds.x + bounds.width / 2),
+    y: Math.round(bounds.y + bounds.height / 2),
+  });
+  const area = display.workArea;
+  const maxX = Math.max(area.x, area.x + area.width - bounds.width);
+  const maxY = Math.max(area.y, area.y + area.height - bounds.height);
+  return {
+    x: Math.min(Math.max(Math.round(bounds.x), area.x), maxX),
+    y: Math.min(Math.max(Math.round(bounds.y), area.y), maxY),
+    width: bounds.width,
+    height: bounds.height,
+  };
+}
+
+function readNoteBoundsCache() {
+  if (noteBoundsCache) return noteBoundsCache;
+  noteBoundsCache = {};
+  try {
+    const saved = JSON.parse(fsSync.readFileSync(notesBoundsPath(), 'utf8'));
+    const entries = saved && typeof saved.notes === 'object' && saved.notes ? saved.notes : {};
+    Object.entries(entries).forEach(([id, value]) => {
+      if (!value || !Number.isFinite(value.x) || !Number.isFinite(value.y)) return;
+      const height = Number.isFinite(value.height)
+        ? Math.min(NOTES_MAX_HEIGHT, Math.max(NOTES_MIN_HEIGHT, Math.round(value.height)))
+        : 220;
+      noteBoundsCache[id] = { x: Math.round(value.x), y: Math.round(value.y), height };
+    });
+  } catch {
+    // Missing or legacy bounds fall back to default placement.
+  }
+  return noteBoundsCache;
+}
+
+function persistNoteBounds() {
+  if (!noteBoundsCache) return;
+  fs.mkdir(path.dirname(notesBoundsPath()), { recursive: true })
+    .then(() => fs.writeFile(notesBoundsPath(), JSON.stringify({ notes: noteBoundsCache }), 'utf8'))
+    .catch(() => {});
+}
+
+function saveNoteBounds(id, win = noteWindows.get(id)) {
+  if (!id || !win || win.isDestroyed()) return;
+  const { x, y, height } = win.getBounds();
+  readNoteBoundsCache()[id] = { x: Math.round(x), y: Math.round(y), height: Math.round(height) };
+  persistNoteBounds();
+}
+
+function saveAllNoteBounds() {
+  noteWindows.forEach((win, id) => saveNoteBounds(id, win));
+}
+
+function removeNoteBounds(id) {
+  const cache = readNoteBoundsCache();
+  if (!(id in cache)) return;
+  delete cache[id];
+  persistNoteBounds();
+}
+
+function defaultNoteBounds() {
+  const area = screen.getPrimaryDisplay().workArea;
+  const index = noteWindows.size % 8;
+  let x = area.x + area.width - NOTES_WIDTH - 32;
+  let y = area.y + 64;
+  if (mainWindow && !mainWindow.isDestroyed()) {
+    const bounds = mainWindow.getBounds();
+    x = Math.max(area.x + 8, bounds.x + bounds.width - NOTES_WIDTH - 8);
+    y = bounds.y + 40;
+  }
+  return clampNoteBounds({ x: x + index * 24, y: y + index * 24, width: NOTES_WIDTH, height: 220 });
+}
+
+function noteById(id) {
+  if (typeof id !== 'string') return null;
+  return notesSync.notes.find((note) => note && note.id === id) || null;
+}
+
+function pushNoteState(id) {
+  const win = noteWindows.get(id);
+  const note = noteById(id);
+  if (!win || win.isDestroyed() || win.webContents.isDestroyed() || win.webContents.isLoading() || !note || !notesSync.appearance) return;
+  win.webContents.send('note:state', { note, appearance: notesSync.appearance });
+}
+
+function pushAllNoteStates() {
+  noteWindows.forEach((_win, id) => pushNoteState(id));
+}
+
+function showNoteWindow(id) {
+  const win = noteWindows.get(id);
+  const note = noteById(id);
+  if (!win || win.isDestroyed() || !note || note.open !== true || notesSuppressed) return;
+  if (win.webContents.isLoading()) return;
+  if (!win.isVisible()) win.showInactive();
+  attachToDesktop(true, win);
+}
+
+function showOpenNoteWindows() {
+  noteWindows.forEach((_win, id) => showNoteWindow(id));
+}
+
+function hideNoteWindow(id) {
+  const win = noteWindows.get(id);
+  if (!win || win.isDestroyed()) return;
+  const state = getLiftState(win);
+  state.detached = false;
+  stopDetachedWatch(win);
+  saveNoteBounds(id, win);
+  if (win.isVisible()) {
+    sendDesktopCommand('hide', win);
+    win.hide();
+  }
+}
+
+function hideAllNoteWindows() {
+  noteWindows.forEach((_win, id) => hideNoteWindow(id));
+}
+
+function destroyNoteWindow(id) {
+  if (noteDrag && noteDrag.id === id) endNoteDrag();
+  const win = noteWindows.get(id);
+  if (!win || win.isDestroyed()) {
+    noteWindows.delete(id);
+    return;
+  }
+  saveNoteBounds(id, win);
+  stopDetachedWatch(win);
+  liftStates.delete(win.id);
+  closingNoteIds.add(id);
+  try {
+    win.destroy();
+  } finally {
+    closingNoteIds.delete(id);
+  }
+  noteWindows.delete(id);
+}
+
+function ensureNoteWindow(id) {
+  const existing = noteWindows.get(id);
+  if (existing && !existing.isDestroyed()) return existing;
+  if (!noteById(id)) return null;
+  const saved = readNoteBoundsCache()[id];
+  const bounds = clampNoteBounds(saved
+    ? { x: saved.x, y: saved.y, width: NOTES_WIDTH, height: saved.height }
+    : defaultNoteBounds());
+  const win = new BrowserWindow({
+    width: bounds.width,
+    height: bounds.height,
+    x: bounds.x,
+    y: bounds.y,
+    transparent: true,
+    frame: false,
+    icon: iconPath(),
+    backgroundColor: '#00000000',
+    alwaysOnTop: false,
+    skipTaskbar: true,
+    hasShadow: false,
+    resizable: false,
+    minimizable: false,
+    maximizable: false,
+    fullscreenable: false,
+    show: false,
+    webPreferences: {
+      preload: path.join(__dirname, 'preload.cjs'),
+      contextIsolation: true,
+      nodeIntegration: false,
+      sandbox: true,
+    },
+  });
+  const windowId = win.id;
+  noteWindows.set(id, win);
+  if (process.env.VITE_DEV_SERVER_URL) {
+    const url = new URL(process.env.VITE_DEV_SERVER_URL);
+    url.searchParams.set('view', 'note');
+    url.searchParams.set('id', id);
+    win.loadURL(url.toString());
+  } else {
+    win.loadFile(path.join(__dirname, '..', 'dist', 'index.html'), { query: { view: 'note', id } });
+  }
+  win.webContents.on('context-menu', (_event, params) => showEditContextMenu(win, params));
+  win.webContents.on('did-finish-load', () => {
+    pushNoteState(id);
+    showNoteWindow(id);
+  });
+  win.webContents.on('render-process-gone', () => {
+    if (!isQuitting && !win.isDestroyed()) win.webContents.reload();
+  });
+  win.on('close', (event) => {
+    if (isQuitting || closingNoteIds.has(id)) return;
+    event.preventDefault();
+    const note = noteById(id);
+    if (note) note.open = false;
+    destroyNoteWindow(id);
+    if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send('notes:open-changed', id, false);
+  });
+  win.on('closed', () => {
+    noteWindows.delete(id);
+    liftStates.delete(windowId);
+  });
+  return win;
+}
+
+function syncNoteWindows() {
+  const knownIds = new Set(notesSync.notes.filter((note) => note && typeof note.id === 'string').map((note) => note.id));
+  const openIds = new Set(notesSync.notes.filter((note) => note && note.open === true).map((note) => note.id));
+  for (const id of [...noteWindows.keys()]) {
+    if (!knownIds.has(id)) {
+      destroyNoteWindow(id);
+      removeNoteBounds(id);
+      continue;
+    }
+    if (!openIds.has(id)) destroyNoteWindow(id);
+  }
+  openIds.forEach((id) => {
+    const existed = noteWindows.has(id);
+    const win = ensureNoteWindow(id);
+    if (!win) return;
+    pushNoteState(id);
+    if (!existed) showNoteWindow(id);
+  });
+  pushAllNoteStates();
+}
+
+function startNoteDrag(id) {
+  const win = noteWindows.get(id);
+  if (!win || win.isDestroyed()) return;
+  if (noteDrag) clearInterval(noteDrag.timer);
+  noteDrag = {
+    id,
+    cursor: screen.getCursorScreenPoint(),
+    bounds: win.getBounds(),
+    startedAt: Date.now(),
+    timer: setInterval(updateNoteDrag, 16),
+  };
+  sendDesktopCommand('raise', win);
+}
+
+function updateNoteDrag() {
+  if (!noteDrag) return;
+  const win = noteWindows.get(noteDrag.id);
+  if (!win || win.isDestroyed() || Date.now() - noteDrag.startedAt > 20_000) {
+    endNoteDrag();
+    return;
+  }
+  const cursor = screen.getCursorScreenPoint();
+  const next = clampNoteBounds({
+    x: noteDrag.bounds.x + cursor.x - noteDrag.cursor.x,
+    y: noteDrag.bounds.y + cursor.y - noteDrag.cursor.y,
+    width: noteDrag.bounds.width,
+    height: noteDrag.bounds.height,
+  });
+  const current = win.getBounds();
+  if (next.x !== current.x || next.y !== current.y) win.setBounds(next);
+}
+
+function endNoteDrag() {
+  if (!noteDrag) return;
+  clearInterval(noteDrag.timer);
+  saveNoteBounds(noteDrag.id);
+  noteDrag = null;
+}
+
+function resizeNoteWindow(id, height) {
+  const win = noteWindows.get(id);
+  if (!win || win.isDestroyed()) return;
+  const numeric = Number(height);
+  if (!Number.isFinite(numeric)) return;
+  const current = win.getBounds();
+  const display = screen.getDisplayNearestPoint({
+    x: Math.round(current.x + current.width / 2),
+    y: Math.round(current.y + current.height / 2),
+  });
+  const area = display.workArea;
+  const maxHeight = Math.max(NOTES_MIN_HEIGHT, Math.min(NOTES_MAX_HEIGHT, area.height - 8));
+  const nextHeight = Math.min(maxHeight, Math.max(NOTES_MIN_HEIGHT, Math.round(numeric)));
+  let y = current.y;
+  if (y + nextHeight > area.y + area.height - 4) y = Math.max(area.y + 4, area.y + area.height - nextHeight - 4);
+  if (current.height !== nextHeight || current.y !== y) {
+    win.setBounds({ x: current.x, y, width: current.width, height: nextHeight });
+  }
+}
+
+function showEditContextMenu(win, params) {
+  const editFlags = params.editFlags || {};
+  const template = [];
+  if (params.isEditable) {
+    template.push(
+      { label: '撤销', role: 'undo', enabled: editFlags.canUndo !== false },
+      { label: '重做', role: 'redo', enabled: editFlags.canRedo !== false },
+      { type: 'separator' },
+      { label: '剪切', role: 'cut', enabled: editFlags.canCut !== false },
+      { label: '复制', role: 'copy', enabled: editFlags.canCopy !== false },
+      { label: '粘贴', role: 'paste', enabled: editFlags.canPaste !== false },
+      { type: 'separator' },
+      { label: '全选', role: 'selectAll', enabled: editFlags.canSelectAll !== false },
+    );
+  } else if (typeof params.selectionText === 'string' && params.selectionText.trim()) {
+    template.push(
+      { label: '复制', role: 'copy' },
+      { type: 'separator' },
+      { label: '全选', role: 'selectAll' },
+    );
+  } else {
+    return;
+  }
+  liftWindowForInput(win);
+  const menu = Menu.buildFromTemplate(template);
+  contextMenuOpen = true;
+  menu.once('menu-will-close', () => {
+    contextMenuOpen = false;
+    const state = getLiftState(win);
+    if (state.detached) startDetachedWatch(win);
+  });
+  menu.popup({ window: win, x: Math.round(params.x), y: Math.round(params.y) });
 }
 
 function registerShortcuts() {
@@ -693,6 +1060,7 @@ function updateTrayMenu() {
   const menu = Menu.buildFromTemplate([
     { label: '显示 / 隐藏日历', click: toggleWindow },
     { label: '新建日程', accelerator: 'Control+N', click: () => sendMenuAction('new-task') },
+    { label: '新建便签', click: () => postMenuAction('note:new') },
     { type: 'separator' },
     { label: '上一月', click: () => sendMenuAction('previous-month') },
     { label: '下一月', click: () => sendMenuAction('next-month') },
@@ -767,38 +1135,7 @@ function createWindow() {
   mainWindow.once('ready-to-show', () => presentWindow(false));
   mainWindow.on('minimize', minimizeWindow);
   mainWindow.on('close', saveWindowBounds);
-  mainWindow.webContents.on('context-menu', (_event, params) => {
-    const editFlags = params.editFlags || {};
-    const template = [];
-    if (params.isEditable) {
-      template.push(
-        { label: '撤销', role: 'undo', enabled: editFlags.canUndo !== false },
-        { label: '重做', role: 'redo', enabled: editFlags.canRedo !== false },
-        { type: 'separator' },
-        { label: '剪切', role: 'cut', enabled: editFlags.canCut !== false },
-        { label: '复制', role: 'copy', enabled: editFlags.canCopy !== false },
-        { label: '粘贴', role: 'paste', enabled: editFlags.canPaste !== false },
-        { type: 'separator' },
-        { label: '全选', role: 'selectAll', enabled: editFlags.canSelectAll !== false },
-      );
-    } else if (typeof params.selectionText === 'string' && params.selectionText.trim()) {
-      template.push(
-        { label: '复制', role: 'copy' },
-        { type: 'separator' },
-        { label: '全选', role: 'selectAll' },
-      );
-    } else {
-      return;
-    }
-    liftWindowForInput();
-    const menu = Menu.buildFromTemplate(template);
-    contextMenuOpen = true;
-    menu.once('menu-will-close', () => {
-      contextMenuOpen = false;
-      if (desktopDetached) startDetachedWatch();
-    });
-    menu.popup({ window: mainWindow, x: Math.round(params.x), y: Math.round(params.y) });
-  });
+  mainWindow.webContents.on('context-menu', (_event, params) => showEditContextMenu(mainWindow, params));
   mainWindow.webContents.on('render-process-gone', () => {
     if (!isQuitting && mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.reload();
   });
@@ -837,6 +1174,7 @@ if (!hasSingleInstanceLock) {
 } else {
   app.on('second-instance', showWindow);
   app.whenReady().then(async () => {
+    nutstore.init({ userDataPath: app.getPath('userData') });
     await restoreSavedSettings();
     createWindow();
     createTray();
@@ -845,7 +1183,11 @@ if (!hasSingleInstanceLock) {
     await applyIntegrationSettings();
     if (latestSettings.autoCheckUpdates) void checkForUpdatesInBackground();
     setInterval(() => {
-      if (!desktopDetached && mainWindow && !mainWindow.isDestroyed() && mainWindow.isVisible()) attachToDesktop();
+      if (mainWindow && !mainWindow.isDestroyed() && mainWindow.isVisible() && !getLiftState(mainWindow)?.detached) attachToDesktop();
+      noteWindows.forEach((win, id) => {
+        const note = noteById(id);
+        if (note?.open === true && win.isVisible() && !win.isDestroyed() && !getLiftState(win)?.detached) attachToDesktop(false, win);
+      });
     }, 30_000);
     setInterval(() => {
       if (latestSettings.autoCheckUpdates) void checkForUpdatesInBackground();
@@ -861,6 +1203,8 @@ if (!hasSingleInstanceLock) {
     globalShortcut.unregisterAll();
     if (desktopLayer.timer) clearInterval(desktopLayer.timer);
     desktopLayer.timer = null;
+    endNoteDrag();
+    saveAllNoteBounds();
     if (focusHelper) {
       try {
         focusHelper.stdin.write('styles:0:0\n');
@@ -898,20 +1242,91 @@ ipcMain.handle('state:save', async (_event, state) => {
 
 ipcMain.handle('window:minimize', minimizeWindow);
 
+ipcMain.on('notes:sync', (_event, payload) => {
+  if (!payload || typeof payload !== 'object') return;
+  notesSync = {
+    notes: Array.isArray(payload.notes) ? payload.notes : [],
+    appearance: payload.appearance && typeof payload.appearance === 'object' ? payload.appearance : null,
+  };
+  syncNoteWindows();
+});
+
+ipcMain.on('note:ready', (_event, id) => {
+  pushNoteState(id);
+  showNoteWindow(id);
+});
+
+ipcMain.on('note:change', (_event, message) => {
+  if (!message || typeof message !== 'object') return;
+  const id = typeof message.id === 'string' ? message.id : '';
+  const note = noteById(id);
+  if (!note) return;
+  const patch = message.patch && typeof message.patch === 'object' ? message.patch : {};
+  const next = { ...note };
+  if (typeof patch.text === 'string') next.text = patch.text;
+  if (typeof patch.completed === 'boolean') next.completed = patch.completed;
+  const index = notesSync.notes.indexOf(note);
+  if (index >= 0) notesSync.notes[index] = next;
+  if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send('notes:patch', { id, patch: { text: next.text, completed: next.completed } });
+});
+
+ipcMain.on('note:close', (_event, id) => {
+  const note = noteById(id);
+  if (!note) return;
+  note.open = false;
+  destroyNoteWindow(id);
+  if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send('notes:open-changed', id, false);
+});
+
+ipcMain.on('note:delete', (_event, id) => {
+  if (!noteById(id)) return;
+  notesSync = { ...notesSync, notes: notesSync.notes.filter((note) => note.id !== id) };
+  destroyNoteWindow(id);
+  removeNoteBounds(id);
+  if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send('notes:deleted', id);
+});
+
+ipcMain.on('note:new', () => {
+  notesSuppressed = false;
+  if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send('notes:create');
+});
+
+ipcMain.on('note:focus', (_event, id) => {
+  const win = noteWindows.get(id);
+  if (!win || win.isDestroyed()) return;
+  notesSuppressed = false;
+  showNoteWindow(id);
+  if (win.isVisible()) liftWindowForInput(win);
+});
+
+ipcMain.on('note:drag-start', (_event, id) => startNoteDrag(id));
+ipcMain.on('note:drag-move', (_event, id) => {
+  if (noteDrag?.id === id) updateNoteDrag();
+});
+ipcMain.on('note:drag-end', (_event, id) => {
+  if (noteDrag?.id === id) endNoteDrag();
+});
+ipcMain.on('note:resize', (_event, id, height) => resizeNoteWindow(id, height));
+
 ipcMain.handle('desktop:interactive', (_event, active) => {
   interactionHold = active === true;
   updateDesktopLayer();
 });
 
-ipcMain.handle('desktop:begin-input', () => liftWindowForInput());
+ipcMain.handle('desktop:begin-input', (event) => {
+  const win = BrowserWindow.fromWebContents(event.sender);
+  return liftWindowForInput(win && !win.isDestroyed() ? win : mainWindow);
+});
 
-ipcMain.handle('window:focus', () => {
-  if (!mainWindow || mainWindow.isDestroyed()) return false;
-  if (!mainWindow.isVisible()) mainWindow.show();
-  mainWindow.focus();
-  mainWindow.webContents.focus();
-  grantOsFocus();
-  return mainWindow.isFocused();
+ipcMain.handle('window:focus', (event) => {
+  const win = BrowserWindow.fromWebContents(event.sender);
+  const target = win && !win.isDestroyed() ? win : mainWindow;
+  if (!target || target.isDestroyed()) return false;
+  if (!target.isVisible()) target.show();
+  target.focus();
+  target.webContents.focus();
+  grantOsFocus(target);
+  return target.isFocused();
 });
 
 ipcMain.handle('window:adjust-mode', (_event, enabled) => {
@@ -976,3 +1391,9 @@ ipcMain.handle('window:adjust-stop', () => {
 ipcMain.handle('window:quit', quitApp);
 
 ipcMain.handle('update:check', checkForUpdates);
+
+ipcMain.handle('sync:status', () => nutstore.getStatus());
+ipcMain.handle('sync:connect', (_event, payload) => nutstore.connect(payload && typeof payload === 'object' ? payload : {}));
+ipcMain.handle('sync:disconnect', () => nutstore.disconnect());
+ipcMain.handle('sync:auto', (_event, enabled) => nutstore.setAutoSync(enabled === true));
+ipcMain.handle('sync:now', (_event, state, options) => nutstore.syncNow(state, options && typeof options === 'object' ? options : {}));

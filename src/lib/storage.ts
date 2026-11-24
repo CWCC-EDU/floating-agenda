@@ -32,6 +32,9 @@ export const DEFAULT_SETTINGS: Settings = {
   bulletStyle: 'number',
   rowGap: 2,
   completedToBottom: true,
+  rolloverHighlightEnabled: false,
+  rolloverHighlightColor: '#ff6b6b',
+  rolloverGhostEnabled: false,
   showCompletedTasks: true,
   showCompletedCheckbox: false,
   showCompletedIcon: false,
@@ -77,11 +80,11 @@ export const DEFAULT_SETTINGS: Settings = {
   language: 'zh-CN',
   proxyEnabled: false,
   proxyServer: '',
-  settingsRevision: 2,
+  settingsRevision: 3,
 };
 
 const BOOLEAN_KEYS = [
-  'rolloverEnabled', 'showWeekNumbers', 'showLunar', 'showTitleBar', 'blurEnabled',
+  'rolloverEnabled', 'rolloverHighlightEnabled', 'rolloverGhostEnabled', 'showWeekNumbers', 'showLunar', 'showTitleBar', 'blurEnabled',
   'showMonthSeparator', 'showShadow', 'showLegalHolidays', 'showImportantFestivals',
   'showSolarTerms', 'showYiJi', 'completedToBottom', 'showCompletedTasks',
   'showCompletedCheckbox', 'showCompletedIcon', 'showReminderTime', 'taskAdaptiveColor',
@@ -134,6 +137,7 @@ function normalizeNote(value: Partial<StickyNote>): StickyNote | null {
     text: value.text,
     completed: Boolean(value.completed),
     createdAt: value.createdAt ?? new Date().toISOString(),
+    open: value.open === true,
   };
 }
 
@@ -188,7 +192,10 @@ export function normalizeAppState(value: unknown): AppState {
   if (savedRevision < 2 && settings.desktopIconLayer === 'auto') {
     settings.desktopIconLayer = 'below';
   }
-  settings.settingsRevision = 2;
+  if (savedRevision < 3 && settings.showNotes) {
+    notes.forEach((note) => { note.open = true; });
+  }
+  settings.settingsRevision = 3;
   settings.festivalRegion = 'CN';
   settings.language = 'zh-CN';
 
@@ -207,6 +214,7 @@ export function normalizeAppState(value: unknown): AppState {
   settings.festivalTextColor = colorValue(raw.festivalTextColor, settings.festivalTextColor);
   settings.solarTermTextColor = colorValue(raw.solarTermTextColor, settings.solarTermTextColor);
   settings.noteTextColor = colorValue(raw.noteTextColor, settings.noteTextColor);
+  settings.rolloverHighlightColor = colorValue(raw.rolloverHighlightColor, settings.rolloverHighlightColor);
 
   if (Array.isArray(raw.restDays)) {
     settings.restDays = [...new Set(raw.restDays.filter((day): day is number => typeof day === 'number' && Number.isInteger(day) && day >= 0 && day <= 6))];

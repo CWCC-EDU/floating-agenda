@@ -31,6 +31,7 @@ export interface StickyNote {
   text: string;
   completed: boolean;
   createdAt: string;
+  open?: boolean;
 }
 
 export interface Settings {
@@ -61,6 +62,9 @@ export interface Settings {
   bulletStyle: BulletStyle;
   rowGap: number;
   completedToBottom: boolean;
+  rolloverHighlightEnabled: boolean;
+  rolloverHighlightColor: string;
+  rolloverGhostEnabled: boolean;
   showCompletedTasks: boolean;
   showCompletedCheckbox: boolean;
   showCompletedIcon: boolean;
@@ -115,6 +119,64 @@ export interface AppState {
   settings: Settings;
 }
 
+export interface NutstoreSyncStatus {
+  configured: boolean;
+  email: string;
+  autoSync: boolean;
+  encryptionAvailable: boolean;
+  remoteLocation: string;
+  lastSyncAt: string | null;
+  lastAttemptAt: string | null;
+  lastResult: string | null;
+  lastError: string | null;
+  remoteSavedAt: string | null;
+}
+
+export interface NutstoreRemoteSummary {
+  savedAt: string | null;
+  taskCount: number;
+  noteCount: number;
+}
+
+export interface NutstoreSyncResult {
+  ok: boolean;
+  action: 'pulled' | 'pushed' | 'up-to-date' | 'conflict' | 'error' | 'not-configured' | 'disabled' | 'busy';
+  message: string;
+  state?: unknown;
+  remote?: NutstoreRemoteSummary;
+  status: NutstoreSyncStatus;
+}
+
+export interface NutstoreConnectResult {
+  ok: boolean;
+  message: string;
+  status: NutstoreSyncStatus;
+}
+
+export interface NutstoreAutoSyncResult {
+  ok: boolean;
+  message: string;
+  status: NutstoreSyncStatus;
+}
+
+export type NotesAppearance = Pick<
+  Settings,
+  | 'backgroundColor'
+  | 'noteOpacity'
+  | 'noteRowGap'
+  | 'noteFontFamily'
+  | 'noteFontSize'
+  | 'noteTextColor'
+  | 'noteTextBackground'
+  | 'noteBulletStyle'
+  | 'showNoteCheckbox'
+>;
+
+export interface NoteStatePayload {
+  note: StickyNote;
+  appearance: NotesAppearance;
+}
+
 export type TaskFilter = 'pending' | 'all' | 'completed';
 export type DesktopMenuAction =
   | 'open-settings'
@@ -124,6 +186,8 @@ export type DesktopMenuAction =
   | 'today'
   | 'toggle-content'
   | 'toggle-notes'
+  | 'note:new'
+  | `note:toggle:${string}`
   | 'complete-selected'
   | `filter:${TaskFilter}`
   | 'toggle:autoNumber'
@@ -155,6 +219,27 @@ export interface DesktopBridge {
   stopWindowAdjustment: () => Promise<void>;
   quitApp: () => Promise<void>;
   checkForUpdates: () => Promise<UpdateCheckResult>;
+  syncNotes: (payload: { notes: StickyNote[]; appearance: NotesAppearance }) => void;
+  noteReady: (id: string) => void;
+  sendNoteChange: (id: string, patch: Partial<Pick<StickyNote, 'text' | 'completed'>>) => void;
+  closeNote: (id: string) => void;
+  deleteNote: (id: string) => void;
+  newNote: () => void;
+  focusNote: (id: string) => void;
+  onNoteState: (callback: (payload: NoteStatePayload) => void) => () => void;
+  onNotesPatch: (callback: (payload: { id: string; patch: Partial<StickyNote> }) => void) => () => void;
+  onNotesOpenChanged: (callback: (id: string, open: boolean) => void) => () => void;
+  onNotesDeleted: (callback: (id: string) => void) => () => void;
+  onNotesCreate: (callback: () => void) => () => void;
+  startNoteDrag: (id: string) => void;
+  dragNoteWindow: (id: string) => void;
+  endNoteDrag: (id: string) => void;
+  resizeNoteWindow: (id: string, height: number) => void;
+  syncGetStatus: () => Promise<NutstoreSyncStatus>;
+  syncConnect: (payload: { email: string; appPassword: string; autoSync: boolean }) => Promise<NutstoreConnectResult>;
+  syncDisconnect: () => Promise<NutstoreConnectResult>;
+  syncSetAutoSync: (enabled: boolean) => Promise<NutstoreAutoSyncResult>;
+  syncNow: (state: AppState, options?: { manual?: boolean; strategy?: 'local' | 'remote' }) => Promise<NutstoreSyncResult>;
   onMenuAction: (callback: (action: DesktopMenuAction) => void) => () => void;
 }
 

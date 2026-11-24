@@ -1,20 +1,24 @@
-import { Fragment, useEffect, useMemo, useRef, useState, type CSSProperties, type MouseEvent, type PointerEvent } from 'react';
-import { CalendarDays, Check, ChevronDown, ChevronLeft, ChevronRight, ListChecks, LogOut, Menu, Move, Palette, Plus, Repeat2, Settings2, StickyNote } from 'lucide-react';
+import { Fragment, useCallback, useEffect, useMemo, useRef, useState, type CSSProperties, type MouseEvent, type PointerEvent } from 'react';
+import { CalendarDays, Check, ChevronDown, ChevronLeft, ChevronRight, ListChecks, LogOut, Menu, Move, Palette, Plus, Repeat2, Settings2, StickyNote as StickyNoteIcon } from 'lucide-react';
 import { DayEditorDialog } from './components/DayEditorDialog';
 import { NotesPanel } from './components/NotesPanel';
 import { SettingsDialog } from './components/SettingsDialog';
 import { addMonths, festivalLabel, fromDateKey, fullDateLabel, getCalendarColumns, getCalendarDays, getWeekNumber, lunarDateLabel, monthLabel, shortDateLabel, solarTermLabel, startOfMonth, toDateKey, yiJiLabel } from './lib/date';
 import { extendRecurringTasks, removeTaskSeries, rolloverTasks, sortTasks } from './lib/tasks';
-import { DEFAULT_SETTINGS, loadAppState, saveAppState } from './lib/storage';
+import { DEFAULT_SETTINGS, loadAppState, normalizeAppState, saveAppState } from './lib/storage';
 import { readableTextColor, taskFontSize } from './lib/appearance';
 import { playSound } from './lib/sound';
-import type { AppState, Settings, Task, TaskFilter, WindowAdjustmentMode, WindowResizeEdge } from './types';
+import type { AppState, NotesAppearance, Settings, StickyNote, Task, TaskFilter, WindowAdjustmentMode, WindowResizeEdge } from './types';
 
 const WEEKDAYS = ['星期日', '星期一', '星期二', '星期三', '星期四', '星期五', '星期六'];
 const WINDOW_RESIZE_EDGES: WindowResizeEdge[] = ['n', 's', 'e', 'w', 'ne', 'nw', 'se', 'sw'];
 const TOP_DATE_FORMATTER = new Intl.DateTimeFormat('zh-CN', { year: 'numeric', month: 'long', day: 'numeric', weekday: 'long' });
 const TASK_TEXT_COLORS = { mint: '#9fd7b5', blue: '#91c6e5', amber: '#e2be83', rose: '#dfa19e', violet: '#b9a9dc' } as const;
 type ToggleSetting = 'autoNumber' | 'showWeekNumbers' | 'showLunar' | 'rolloverEnabled' | 'autoStartEnabled';
+
+function newStickyNote(): StickyNote {
+  return { id: crypto.randomUUID(), text: '', completed: false, createdAt: new Date().toISOString(), open: true };
+}
 
 export default function App() {
   const [today, setToday] = useState(toDateKey());
@@ -29,6 +33,10 @@ export default function App() {
   const [showContent, setShowContent] = useState(true);
   const [isAdjusting, setIsAdjusting] = useState(false);
   const [toast, setToast] = useState('');
+  const syncBusy = useRef(false);
+  const syncConflictNotice = useRef('');
+  const stateRef = useRef(state);
+  stateRef.current = state;
   const adjustmentPointer = useRef<number | null>(null);
   const notifiedTasks = useRef(new Set<string>());
   const isElectron = Boolean(window.desktop);
@@ -92,6 +100,109 @@ export default function App() {
     if (!isReady) return;
     saveAppState(state).catch(() => setToast('保存失败，请检查本地存储权限'));
   }, [state, isReady]);
+
+  const applyRemoteState = useCallback((raw: unknown) => {
+    const normalized = normalizeAppState(raw);
+    const todayKey = toDateKey();
+    const result = rolloverTasks(normalized.tasks, todayKey, normalized.settings);
+    const extended = extendRecurringTasks(result.tasks, todayKey);
+    setState({ ...normalized, tasks: extended.tasks });
+    setToast('已从坚果云同步');
+  }, []);
+
+  const syncSilently = useCallback(async () => {
+    if (!window.desktop || syncBusy.current) return;
+    syncBusy.current = true;
+    try {
+      const result = await window.desktop.syncNow(stateRef.current, { manual: false });
+      if (result.action === 'pulled' && result.state) {
+        applyRemoteState(result.state);
+      } else if (result.action === 'conflict') {
+        const key = result.remote?.savedAt ?? 'conflict';
+        if (syncConflictNotice.current !== key) {
+          syncConflictNotice.current = key;
+          setToast('坚果云上有另一份日历，请到 设置 → 同步 选择保留哪一份');
+        }
+      }
+    } catch {
+      // Automatic sync failures stay silent; the settings page shows details.
+    } finally {
+      syncBusy.current = false;
+    }
+  }, [applyRemoteState]);
+
+  useEffect(() => {
+    if (!isElectron || !isReady || showSettings || editor) return;
+    const timer = window.setTimeout(() => { void syncSilently(); }, 8000);
+    return () => window.clearTimeout(timer);
+  }, [editor, isElectron, isReady, showSettings, state, syncSilently]);
+
+  useEffect(() => {
+    if (!isElectron || !isReady) return;
+    const timer = window.setInterval(() => {
+      if (!showSettings && !editor) void syncSilently();
+    }, 5 * 60 * 1000);
+    return () => window.clearInterval(timer);
+  }, [editor, isElectron, isReady, showSettings, syncSilently]);
+
+  const notesAppearance = useMemo<NotesAppearance>(() => ({
+    backgroundColor: state.settings.backgroundColor,
+    noteOpacity: state.settings.noteOpacity,
+    noteRowGap: state.settings.noteRowGap,
+    noteFontFamily: state.settings.noteFontFamily,
+    noteFontSize: state.settings.noteFontSize,
+    noteTextColor: state.settings.noteTextColor,
+    noteTextBackground: state.settings.noteTextBackground,
+    noteBulletStyle: state.settings.noteBulletStyle,
+    showNoteCheckbox: state.settings.showNoteCheckbox,
+  }), [
+    state.settings.backgroundColor,
+    state.settings.noteOpacity,
+    state.settings.noteRowGap,
+    state.settings.noteFontFamily,
+    state.settings.noteFontSize,
+    state.settings.noteTextColor,
+    state.settings.noteTextBackground,
+    state.settings.noteBulletStyle,
+    state.settings.showNoteCheckbox,
+  ]);
+
+  useEffect(() => {
+    if (!isElectron || !isReady) return;
+    window.desktop?.syncNotes({ notes: state.notes, appearance: notesAppearance });
+  }, [isElectron, isReady, notesAppearance, state.notes]);
+
+  useEffect(() => {
+    if (!isElectron) return;
+    const offPatch = window.desktop?.onNotesPatch(({ id, patch }) => {
+      setState((current) => ({
+        ...current,
+        notes: current.notes.map((note) => note.id === id ? { ...note, ...patch } : note),
+      }));
+    });
+    const offOpen = window.desktop?.onNotesOpenChanged((id, open) => {
+      setState((current) => ({
+        ...current,
+        notes: current.notes.map((note) => note.id === id ? { ...note, open } : note),
+      }));
+    });
+    const offDeleted = window.desktop?.onNotesDeleted((id) => {
+      setState((current) => ({ ...current, notes: current.notes.filter((note) => note.id !== id) }));
+    });
+    const offCreate = window.desktop?.onNotesCreate(() => {
+      setState((current) => ({
+        ...current,
+        settings: { ...current.settings, showNotes: true },
+        notes: [...current.notes, newStickyNote()],
+      }));
+    });
+    return () => {
+      offPatch?.();
+      offOpen?.();
+      offDeleted?.();
+      offCreate?.();
+    };
+  }, [isElectron]);
 
   useEffect(() => {
     if (!toast) return;
@@ -180,6 +291,20 @@ export default function App() {
     return grouped;
   }, [state.tasks]);
 
+  const ghostTasksByDate = useMemo(() => {
+    const grouped = new Map<string, Task[]>();
+    if (!state.settings.rolloverEnabled || !state.settings.rolloverGhostEnabled) return grouped;
+    state.tasks.forEach((task) => {
+      if (task.completed || task.repeat !== 'none' || task.rolloverCount <= 0) return;
+      const original = task.originalDate || task.date;
+      if (!original || original === task.date) return;
+      const tasks = grouped.get(original) ?? [];
+      tasks.push(task);
+      grouped.set(original, tasks);
+    });
+    return grouped;
+  }, [state.settings.rolloverEnabled, state.settings.rolloverGhostEnabled, state.tasks]);
+
   const columnCount = getCalendarColumns(state.settings.layout, state.settings.maxColumns);
   const weekdays = useMemo(() => Array.from({ length: columnCount }, (_, index) => WEEKDAYS[(state.settings.weekStartsOn + index) % 7]), [columnCount, state.settings.weekStartsOn]);
   const rowCount = Math.ceil(calendarDays.length / columnCount);
@@ -217,6 +342,56 @@ export default function App() {
   function goToToday() {
     setSelectedDate(today);
     setMonthCursor(startOfMonth(today));
+  }
+
+  function createNote() {
+    setShowWindowMenu(false);
+    setShowSettings(false);
+    setState((current) => ({
+      ...current,
+      settings: { ...current.settings, showNotes: true },
+      notes: [...current.notes, newStickyNote()],
+    }));
+  }
+
+  function openNote(id: string) {
+    setShowWindowMenu(false);
+    setShowSettings(false);
+    setState((current) => ({
+      ...current,
+      settings: { ...current.settings, showNotes: true },
+      notes: current.notes.map((note) => note.id === id ? { ...note, open: true } : note),
+    }));
+    void window.desktop?.focusNote(id);
+  }
+
+  function toggleNoteOpen(id: string) {
+    setState((current) => ({
+      ...current,
+      notes: current.notes.map((note) => note.id === id ? { ...note, open: !note.open } : note),
+    }));
+  }
+
+  function toggleNotesVisibility() {
+    setState((current) => {
+      if (current.notes.length === 0) {
+        return { ...current, settings: { ...current.settings, showNotes: true }, notes: [newStickyNote()] };
+      }
+      const anyOpen = current.notes.some((note) => note.open);
+      if (anyOpen) {
+        return {
+          ...current,
+          settings: { ...current.settings, showNotes: false },
+          notes: current.notes.map((note) => ({ ...note, open: false })),
+        };
+      }
+      const latest = [...current.notes].sort((a, b) => b.createdAt.localeCompare(a.createdAt))[0];
+      return {
+        ...current,
+        settings: { ...current.settings, showNotes: true },
+        notes: current.notes.map((note) => note.id === latest.id ? { ...note, open: true } : note),
+      };
+    });
   }
 
   function saveDayTasks(date: string, editedTasks: Task[], close = true) {
@@ -315,7 +490,11 @@ export default function App() {
       } else if (action === 'toggle-content') {
         setShowContent((current) => !current);
       } else if (action === 'toggle-notes') {
-        setState((current) => ({ ...current, settings: { ...current.settings, showNotes: !current.settings.showNotes } }));
+        toggleNotesVisibility();
+      } else if (action === 'note:new') {
+        createNote();
+      } else if (action.startsWith('note:toggle:')) {
+        toggleNoteOpen(action.slice(12));
       } else if (action === 'complete-selected') {
         completeSelectedTask();
       } else if (action.startsWith('filter:')) {
@@ -364,7 +543,20 @@ export default function App() {
           <div className="window-function-menu" role="menu" aria-label="日历功能">
             <label className="window-menu-date"><CalendarDays size={15} /><span>选择日期</span><input type="month" aria-label="选择月份" value={monthCursor.slice(0, 7)} onChange={(event) => { if (event.target.value) setMonthCursor(`${event.target.value}-01`); }} /></label>
             <button type="button" role="menuitem" onClick={openSettingsFromMenu}><Palette size={15} /><span>主题皮肤</span></button>
-            <button type="button" role="menuitem" onClick={() => { setShowWindowMenu(false); setState((current) => ({ ...current, settings: { ...current.settings, showNotes: !current.settings.showNotes } })); }}><StickyNote size={15} /><span>{state.settings.showNotes ? '隐藏桌面便签' : '显示桌面便签'}</span></button>
+            <div className="window-menu-notes">
+              <button type="button" role="menuitem" onClick={createNote}><Plus size={15} /><span>新建便签</span></button>
+              {state.notes.length > 0 && (
+                <div className="window-menu-note-list">
+                  {[...state.notes].sort((a, b) => b.createdAt.localeCompare(a.createdAt)).map((note) => (
+                    <button type="button" role="menuitem" className={note.open ? 'is-open' : ''} key={note.id} title={note.text || '空白便签'} onClick={() => openNote(note.id)}>
+                      <StickyNoteIcon size={13} />
+                      <span>{(note.text.trim().split('\n')[0] || '空白便签').slice(0, 18)}</span>
+                      <em>{note.open ? '已打开' : '已关闭'}</em>
+                    </button>
+                  ))}
+                </div>
+              )}
+            </div>
             <button type="button" role="menuitem" className={isAdjusting ? 'is-active' : ''} disabled={!isElectron} onClick={toggleAdjustmentMode}><Move size={15} /><span>{isAdjusting ? '完成位置和大小调整' : '调整位置和大小'}</span>{isAdjusting && <Check size={14} />}</button>
             <button type="button" role="menuitem" disabled={!isElectron} onClick={() => { setShowWindowMenu(false); void window.desktop?.minimizeWindow(); }}><ChevronDown size={15} /><span>隐藏日历清单</span></button>
             <div className="window-menu-separator" />
@@ -384,11 +576,13 @@ export default function App() {
               const day = fromDateKey(date);
               const isCurrentMonth = startOfMonth(date) === monthCursor;
               const dayTasks = sortTasks((tasksByDate.get(date) ?? []).filter(matchesFilter), state.settings.completedToBottom);
+              const ghostTasks = filter === 'completed' ? [] : (ghostTasksByDate.get(date) ?? []);
+              const rowCountForDay = dayTasks.length + ghostTasks.length;
               const festival = festivalLabel(date, state.settings);
               const solarTerm = state.settings.showSolarTerms ? solarTermLabel(date) : '';
               const secondaryLabel = festival || solarTerm || (state.settings.showLunar ? lunarDateLabel(date) : '');
               const isRestDay = state.settings.showRestDays && state.settings.restDays.includes(day.getDay());
-              const fontSize = taskFontSize(dayTasks.length, state.settings.taskBaseFontSize, state.settings.taskMinFontSize, state.settings.taskScrollThreshold);
+              const fontSize = taskFontSize(rowCountForDay, state.settings.taskBaseFontSize, state.settings.taskMinFontSize, state.settings.taskScrollThreshold);
               return (
                 <Fragment key={date}>
                   {state.settings.showWeekNumbers && index % columnCount === 0 && <div className={`week-number-cell ${index >= calendarDays.length - columnCount ? 'is-last-row' : ''}`}>{getWeekNumber(date, state.settings.weekNumberMode)}</div>}
@@ -396,7 +590,7 @@ export default function App() {
                     className={`day-cell ${isCurrentMonth ? '' : 'is-other-month'} ${date === today ? 'is-today' : ''} ${date === selectedDate ? 'is-selected' : ''} ${isRestDay ? 'is-weekend' : ''} ${index % columnCount === columnCount - 1 ? 'is-last-column' : ''} ${index >= calendarDays.length - columnCount ? 'is-last-row' : ''}`}
                     role="gridcell"
                     aria-selected={date === selectedDate}
-                    aria-label={`${fullDateLabel(date)}，${dayTasks.length} 项日程`}
+                    aria-label={`${fullDateLabel(date)}，${rowCountForDay} 项日程`}
                     onClick={() => setSelectedDate(date)}
                     onDoubleClick={(event) => addFromDoubleClick(event, date)}
                   >
@@ -406,20 +600,38 @@ export default function App() {
                       <button className="day-add" type="button" aria-label={`在 ${shortDateLabel(date)} 添加日程`} title="添加日程" onClick={(event) => { event.stopPropagation(); setEditor({ date }); }}><Plus size={13} /></button>
                     </div>
 
-                    <div className={`day-tasks ${dayTasks.length > state.settings.taskScrollThreshold ? 'is-scrollable' : ''}`} style={{ '--task-font-size': `${fontSize}px` } as CSSProperties}>
-                      {dayTasks.map((task, taskIndex) => (
-                        <div className={`calendar-task ${task.completed ? 'is-completed' : ''}`} data-color={task.color} data-background={state.settings.taskTextBackground} style={{ '--task-item-color': task.color === 'default' ? defaultTaskColor : TASK_TEXT_COLORS[task.color] } as CSSProperties} key={task.id}>
-                          {state.settings.showCompletedCheckbox && <input className="task-checkbox" type="checkbox" aria-label={`完成 ${task.title}`} checked={task.completed} onClick={(event) => event.stopPropagation()} onChange={() => toggleTaskCompletion(task)} />}
-                          <button className="calendar-task-label" type="button" title={`${task.time ? `${task.time} ` : ''}${task.title}`} onClick={(event) => { event.stopPropagation(); setEditor({ date, taskId: task.id }); }}>
-                            {state.settings.bulletStyle !== 'none' && <span className="task-number">{state.settings.bulletStyle === 'number' ? `${taskIndex + 1}.` : '•'}</span>}
+                    <div className={`day-tasks ${rowCountForDay > state.settings.taskScrollThreshold ? 'is-scrollable' : ''}`} style={{ '--task-font-size': `${fontSize}px` } as CSSProperties}>
+                      {dayTasks.map((task, taskIndex) => {
+                        const rolledOver = state.settings.rolloverEnabled && state.settings.rolloverHighlightEnabled && task.rolloverCount > 0;
+                        const taskColor = rolledOver ? state.settings.rolloverHighlightColor : task.color === 'default' ? defaultTaskColor : TASK_TEXT_COLORS[task.color];
+                        return (
+                          <div className={`calendar-task ${task.completed ? 'is-completed' : ''} ${rolledOver ? 'is-rolled-over' : ''}`} data-color={task.color} data-background={state.settings.taskTextBackground} data-rollover={rolledOver ? 'true' : undefined} style={{ '--task-item-color': taskColor } as CSSProperties} key={task.id}>
+                            {state.settings.showCompletedCheckbox && <input className="task-checkbox" type="checkbox" aria-label={`完成 ${task.title}`} checked={task.completed} onClick={(event) => event.stopPropagation()} onChange={() => toggleTaskCompletion(task)} />}
+                            <button className="calendar-task-label" type="button" title={`${task.time ? `${task.time} ` : ''}${task.title}${rolledOver ? ` · 已顺延 ${task.rolloverCount} 次` : ''}`} onClick={(event) => { event.stopPropagation(); setEditor({ date, taskId: task.id }); }}>
+                              {state.settings.bulletStyle !== 'none' && <span className="task-number">{state.settings.bulletStyle === 'number' ? `${taskIndex + 1}.` : '•'}</span>}
+                              <span className="task-title">{task.title}</span>
+                              {state.settings.showReminderTime && task.time && <span className="task-time">{task.time}</span>}
+                              {task.completed && state.settings.showCompletedIcon && <Check className="task-complete-icon" size={11} />}
+                              {task.repeat !== 'none' && <span className="task-indicators"><Repeat2 className="task-repeat" size={10} /></span>}
+                            </button>
+                          </div>
+                        );
+                      })}
+                      {ghostTasks.map((task) => (
+                        <div className="calendar-task is-rollover-ghost" data-background={state.settings.taskTextBackground} style={{ '--task-item-color': state.settings.rolloverHighlightEnabled ? state.settings.rolloverHighlightColor : defaultTaskColor } as CSSProperties} key={`ghost-${task.id}`}>
+                          <button className="calendar-task-label" type="button" title={`「${task.title}」原定 ${shortDateLabel(task.originalDate || task.date)}，已顺延到 ${shortDateLabel(task.date)}，点击打开`} onClick={(event) => {
+                            event.stopPropagation();
+                            setSelectedDate(task.date);
+                            setMonthCursor(startOfMonth(task.date));
+                            setEditor({ date: task.date, taskId: task.id });
+                          }}>
+                            <span className="task-number">↷</span>
                             <span className="task-title">{task.title}</span>
-                            {state.settings.showReminderTime && task.time && <span className="task-time">{task.time}</span>}
-                            {task.completed && state.settings.showCompletedIcon && <Check className="task-complete-icon" size={11} />}
-                            {task.repeat !== 'none' && <span className="task-indicators"><Repeat2 className="task-repeat" size={10} /></span>}
+                            <span className="task-rollover-badge">顺延</span>
                           </button>
                         </div>
                       ))}
-                      {dayTasks.length === 0 && <span className="double-click-hint">双击添加</span>}
+                      {rowCountForDay === 0 && <span className="double-click-hint">双击添加</span>}
                     </div>
                   </div>
                 </Fragment>
@@ -428,7 +640,7 @@ export default function App() {
           </div>
         </>}
 
-        {state.settings.showNotes && <NotesPanel notes={state.notes} settings={state.settings} onChange={(notes) => setState((current) => ({ ...current, notes }))} onClose={() => setState((current) => ({ ...current, settings: { ...current.settings, showNotes: false } }))} />}
+        {state.settings.showNotes && !isElectron && <NotesPanel notes={state.notes} settings={state.settings} onChange={(notes) => setState((current) => ({ ...current, notes }))} onClose={() => setState((current) => ({ ...current, settings: { ...current.settings, showNotes: false } }))} />}
 
         {isAdjusting && <>
           <div className="adjustment-guard" aria-hidden="true" />
@@ -439,7 +651,7 @@ export default function App() {
 
         {!isReady && <div className="loading-cover"><span /><p>正在整理你的日历…</p></div>}
         {editor && <DayEditorDialog date={editor.date} tasks={tasksByDate.get(editor.date) ?? []} initialTaskId={editor.taskId} settings={state.settings} onAutoSave={(tasks) => saveDayTasks(editor.date, tasks, false)} onSave={(tasks) => saveDayTasks(editor.date, tasks)} onCancelSeries={cancelTaskSeries} onClose={() => setEditor(null)} />}
-        {showSettings && <SettingsDialog settings={state.settings} isElectron={isElectron} onChange={updateSettings} onClose={() => setShowSettings(false)} onOpenNotes={() => { setShowSettings(false); setState((current) => ({ ...current, settings: { ...current.settings, showNotes: true } })); }} />}
+        {showSettings && <SettingsDialog settings={state.settings} notes={state.notes} appState={state} isElectron={isElectron} onChange={updateSettings} onClose={() => setShowSettings(false)} onCreateNote={createNote} onOpenNote={openNote} onApplyRemote={applyRemoteState} />}
         {toast && <div className="toast" role="status"><ListChecks size={16} />{toast}</div>}
       </section>
     </main>

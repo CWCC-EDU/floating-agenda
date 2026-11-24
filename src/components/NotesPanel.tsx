@@ -1,7 +1,7 @@
 import { Plus, StickyNote as StickyNoteIcon, Trash2, X } from 'lucide-react';
 import { useEffect, useRef, useState } from 'react';
 import type { CSSProperties, PointerEvent as ReactPointerEvent } from 'react';
-import type { Settings, StickyNote } from '../types';
+import type { NotesAppearance, StickyNote } from '../types';
 
 const NOTE_PANEL_POSITION_KEY = 'floating-agenda-note-panel-position-v1';
 const PANEL_MARGIN = 4;
@@ -34,7 +34,7 @@ function clampPanelPosition(left: number, top: number, panel: HTMLElement, shell
 
 interface NotesPanelProps {
   notes: StickyNote[];
-  settings: Settings;
+  settings: NotesAppearance;
   onChange: (notes: StickyNote[]) => void;
   onClose: () => void;
 }
@@ -130,7 +130,7 @@ export function NotesPanel({ notes, settings, onChange, onClose }: NotesPanelPro
 
   return (
     <aside ref={panelRef} className={`notes-panel ${dragging ? 'is-dragging' : ''}`} style={style} aria-label="桌面便签">
-      <header title="按住拖动便签" onPointerDown={startNoteDrag}><StickyNoteIcon size={15} /><strong>桌面便签</strong><button type="button" aria-label="新增便签" onClick={() => onChange([...notes, { id: crypto.randomUUID(), text: '', completed: false, createdAt: new Date().toISOString() }])}><Plus size={15} /></button><button type="button" aria-label="关闭便签" onClick={onClose}><X size={15} /></button></header>
+      <header title="按住拖动便签" onPointerDown={startNoteDrag}><StickyNoteIcon size={15} /><strong>桌面便签</strong><button type="button" aria-label="新增便签" onClick={() => onChange([...notes, { id: crypto.randomUUID(), text: '', completed: false, createdAt: new Date().toISOString(), open: true }])}><Plus size={15} /></button><button type="button" aria-label="关闭便签" onClick={onClose}><X size={15} /></button></header>
       <div className="notes-list">
         {notes.map((note, index) => (
           <div className={`sticky-note ${note.completed ? 'is-completed' : ''}`} data-background={settings.noteTextBackground} key={note.id}>
@@ -142,7 +142,7 @@ export function NotesPanel({ notes, settings, onChange, onClose }: NotesPanelPro
             }}><Trash2 size={13} /></button>
           </div>
         ))}
-        {notes.length === 0 && <div className="notes-empty"><StickyNoteIcon size={23} /><p>还没有便签</p><button type="button" onClick={() => onChange([{ id: crypto.randomUUID(), text: '', completed: false, createdAt: new Date().toISOString() }])}>新建第一条</button></div>}
+        {notes.length === 0 && <div className="notes-empty"><StickyNoteIcon size={23} /><p>还没有便签</p><button type="button" onClick={() => onChange([{ id: crypto.randomUUID(), text: '', completed: false, createdAt: new Date().toISOString(), open: true }])}>新建第一条</button></div>}
       </div>
     </aside>
   );

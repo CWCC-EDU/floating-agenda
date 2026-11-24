@@ -1,24 +1,30 @@
 import { useState, type CSSProperties, type KeyboardEvent, type ReactNode } from 'react';
-import { CalendarDays, ChevronRight, Info, Keyboard, LayoutGrid, Monitor, RotateCcw, SlidersHorizontal, StickyNote, Type, X } from 'lucide-react';
+import { CalendarDays, ChevronRight, Cloud, Info, Keyboard, LayoutGrid, Monitor, RotateCcw, SlidersHorizontal, StickyNote as StickyNoteIcon, Type, X } from 'lucide-react';
 import { DEFAULT_SETTINGS } from '../lib/storage';
-import type { BulletStyle, CalendarLayout, DesktopIconLayer, EditorInputStyle, FontFamily, Settings, SoundEffect, TextBackground, UpdateCheckResult } from '../types';
+import { SyncSettings } from './SyncSettings';
+import type { AppState, BulletStyle, CalendarLayout, DesktopIconLayer, EditorInputStyle, FontFamily, Settings, SoundEffect, StickyNote, TextBackground, UpdateCheckResult } from '../types';
 
-type Category = 'calendar' | 'cells' | 'appearance' | 'notes' | 'advanced' | 'about';
+type Category = 'calendar' | 'cells' | 'appearance' | 'notes' | 'sync' | 'advanced' | 'about';
 type ShortcutKey = 'showHideShortcut' | 'toggleContentShortcut' | 'toggleNotesShortcut' | 'completeTaskShortcut';
 
 interface SettingsDialogProps {
   settings: Settings;
+  notes: StickyNote[];
+  appState: AppState;
   isElectron: boolean;
   onChange: (settings: Settings) => void;
   onClose: () => void;
-  onOpenNotes: () => void;
+  onCreateNote: () => void;
+  onOpenNote: (id: string) => void;
+  onApplyRemote: (state: unknown) => void;
 }
 
 const CATEGORIES = [
   { id: 'calendar', label: '日历', icon: CalendarDays },
   { id: 'cells', label: '单元格', icon: LayoutGrid },
   { id: 'appearance', label: '字体和颜色', icon: Type },
-  { id: 'notes', label: '便签', icon: StickyNote },
+  { id: 'notes', label: '便签', icon: StickyNoteIcon },
+  { id: 'sync', label: '同步', icon: Cloud },
   { id: 'advanced', label: '高级', icon: SlidersHorizontal },
   { id: 'about', label: '关于', icon: Info },
 ] as const;
@@ -177,7 +183,7 @@ function ShortcutRow({ title, setting, value, disabled, onChange }: { title: str
   );
 }
 
-export function SettingsDialog({ settings, isElectron, onChange, onClose, onOpenNotes }: SettingsDialogProps) {
+export function SettingsDialog({ settings, notes, appState, isElectron, onChange, onClose, onCreateNote, onOpenNote, onApplyRemote }: SettingsDialogProps) {
   const [category, setCategory] = useState<Category>('calendar');
   const [updateResult, setUpdateResult] = useState<UpdateCheckResult | null>(null);
   const update = (patch: Partial<Settings>) => onChange({ ...settings, ...patch });
@@ -255,6 +261,9 @@ export function SettingsDialog({ settings, isElectron, onChange, onClose, onOpen
                   <ToggleRow title="启用日程提醒" description="到点时显示本机通知并播放提示音" checked={settings.remindersEnabled} onChange={(remindersEnabled) => update({ remindersEnabled })} />
                   <ToggleRow title="未完成任务自动顺延" checked={settings.rolloverEnabled} onChange={(rolloverEnabled) => update({ rolloverEnabled })} />
                   <SelectRow title="自动顺延范围" value={settings.rolloverWindow} options={numberOptions(1, 30, ' 天')} disabled={!settings.rolloverEnabled} onChange={(rolloverWindow) => update({ rolloverWindow })} />
+                  <ToggleRow title="顺延任务高亮" description="被顺延过的未完成任务使用指定颜色显示" checked={settings.rolloverHighlightEnabled} disabled={!settings.rolloverEnabled} onChange={(rolloverHighlightEnabled) => update({ rolloverHighlightEnabled })} />
+                  {settings.rolloverEnabled && settings.rolloverHighlightEnabled && <ColorRow title="顺延任务颜色" value={settings.rolloverHighlightColor} onChange={(rolloverHighlightColor) => update({ rolloverHighlightColor })} />}
+                  <ToggleRow title="在原日期保留顺延分身" description="原定日期显示带「顺延」标记的浅色记录，点击可打开当前任务" checked={settings.rolloverGhostEnabled} disabled={!settings.rolloverEnabled} onChange={(rolloverGhostEnabled) => update({ rolloverGhostEnabled })} />
                   <SelectRow title="显示文字背景" value={settings.taskTextBackground} options={backgroundOptions} onChange={(taskTextBackground) => update({ taskTextBackground })} />
                 </Section>
                 <Section title="任务密度与滚动">
@@ -291,8 +300,8 @@ export function SettingsDialog({ settings, isElectron, onChange, onClose, onOpen
               </>}
 
               {category === 'notes' && <>
-                <Section title="便签显示">
-                  <ToggleRow title="显示桌面便签" checked={settings.showNotes} onChange={(showNotes) => update({ showNotes })} />
+                <Section title="便签外观">
+                  {!isElectron && <ToggleRow title="显示桌面便签" checked={settings.showNotes} onChange={(showNotes) => update({ showNotes })} />}
                   <ChoiceCards value={settings.noteBulletStyle} options={BULLETS} kind="bullet" onChange={(noteBulletStyle) => update({ noteBulletStyle })} />
                   <RangeRow title="便签不透明度" value={settings.noteOpacity} min={0} max={100} unit="%" onChange={(noteOpacity) => update({ noteOpacity })} />
                   <SelectRow title="行间距" value={settings.noteRowGap} options={numberOptions(0, 8)} onChange={(noteRowGap) => update({ noteRowGap })} />
@@ -300,8 +309,20 @@ export function SettingsDialog({ settings, isElectron, onChange, onClose, onOpen
                   <SelectRow title="显示文字背景" value={settings.noteTextBackground} options={backgroundOptions} onChange={(noteTextBackground) => update({ noteTextBackground })} />
                   <ToggleRow title="显示完成勾选框" checked={settings.showNoteCheckbox} onChange={(showNoteCheckbox) => update({ showNoteCheckbox })} />
                 </Section>
-                <Section title="便签管理"><button className="settings-link-button" type="button" onClick={onOpenNotes}><span>新增、编辑和删除本机便签</span><ChevronRight size={16} /></button></Section>
+                <Section title="便签窗口">
+                  <button className="settings-link-button" type="button" onClick={onCreateNote}><span>新建便签窗口</span><ChevronRight size={16} /></button>
+                  {notes.map((note) => (
+                    <button className="settings-note-row" type="button" key={note.id} title={note.text || '空白便签'} onClick={() => onOpenNote(note.id)}>
+                      <span>{(note.text.trim().split('\n')[0] || '空白便签').slice(0, 40)}</span>
+                      <em className={note.open ? 'is-open' : ''}>{note.open ? '已打开' : '已关闭'}</em>
+                    </button>
+                  ))}
+                  {notes.length === 0 && <p className="settings-note-empty">还没有便签。点击上方按钮新建一张。</p>}
+                  {isElectron && <p className="settings-note-empty">关闭便签窗口不会删除内容，可从右上角功能菜单重新打开。</p>}
+                </Section>
               </>}
+
+              {category === 'sync' && <SyncSettings appState={appState} onApplyRemote={onApplyRemote} />}
 
               {category === 'advanced' && <>
                 <Section title="高级设置">
@@ -331,7 +352,7 @@ export function SettingsDialog({ settings, isElectron, onChange, onClose, onOpen
               </>}
 
               {category === 'about' && <>
-                <Section title="浮屿桌面日历"><div className="about-panel"><Monitor size={28} /><strong>透明桌面月历 · 本地便携版</strong><p>任务、便签和设置均保存在这台电脑。月历常驻桌面底层，不置顶，也不会上传日程内容。</p></div></Section>
+                <Section title="浮屿桌面日历"><div className="about-panel"><Monitor size={28} /><strong>透明桌面月历 · 本地便携版</strong><p>任务、便签和设置默认保存在这台电脑。只有在你主动连接坚果云后，日历数据才会同步到你自己的坚果云。</p></div></Section>
                 <Section title="常用操作"><div className="about-shortcuts"><span><Keyboard size={14} />新建日程</span><kbd>Ctrl + N</kbd><span>隐藏 / 唤起</span><kbd>{settings.showHideShortcut || '未启用'}</kbd><span>编辑日期</span><kbd>双击日期格</kbd></div></Section>
               </>}
             </div>
