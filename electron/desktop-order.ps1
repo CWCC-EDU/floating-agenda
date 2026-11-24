@@ -5,6 +5,7 @@ Add-Type -AssemblyName Accessibility
 Add-Type -ReferencedAssemblies ([Accessibility.IAccessible].Assembly.Location) -TypeDefinition @"
 using System;
 using System.Collections.Generic;
+using System.Diagnostics;
 using System.Runtime.InteropServices;
 using System.Text;
 using System.Threading.Tasks;
@@ -16,6 +17,10 @@ public static class AgendaDesktopOrder {
     private const uint PositionOnly = 0x4213; // No size, move, activation or owner changes. Use an async request.
     private static readonly IntPtr Topmost = new IntPtr(-1);
     private static IntPtr desktopPresentation;
+    private static bool desktopWasTopmost;
+    private static IntPtr desktopCandidate;
+    private static long desktopSince;
+    private static readonly long DesktopSettleTicks = Stopwatch.Frequency * 300 / 1000;
     private static readonly IntPtr NotTopmost = new IntPtr(-2);
     private static readonly Dictionary<IntPtr, string> Regions = new Dictionary<IntPtr, string>();
     private static IntPtr iconList;
@@ -89,6 +94,19 @@ public static class AgendaDesktopOrder {
 
     private static bool IsTopmost(IntPtr hwnd) {
         return (GetWindowLongPtr(hwnd, GWL_EXSTYLE).ToInt64() & WS_EX_TOPMOST) != 0;
+    }
+
+    private static bool IsDesktopSettled(IntPtr calendar, bool needsPresentation) {
+        if (calendar == IntPtr.Zero || !needsPresentation) {
+            desktopCandidate = IntPtr.Zero;
+            return false;
+        }
+        long now = Stopwatch.GetTimestamp();
+        if (desktopCandidate != calendar) {
+            desktopCandidate = calendar;
+            desktopSince = now;
+        }
+        return now - desktopSince >= DesktopSettleTicks;
     }
 
     private static void UpdateIcons(IntPtr list) {
@@ -217,10 +235,10 @@ public static class AgendaDesktopOrder {
 
         IntPtr desktopHost = iconHost != IntPtr.Zero ? iconHost : shell;
         IntPtr foreground = GetForegroundWindow();
-        if (calendar != IntPtr.Zero && (foreground == shell || foreground == desktopHost)
-            && (IsIconic(calendar) || !IsWindowVisible(calendar))) {
-            ShowWindowAsync(calendar, 4); // SW_SHOWNOACTIVATE
-        }
+        bool desktopForeground = foreground != IntPtr.Zero && (foreground == shell || foreground == desktopHost);
+        bool usingDesktop = desktopForeground || (desktopPresentation == calendar && widgets.Contains(foreground));
+        bool restoreCalendar = calendar != IntPtr.Zero && desktopForeground
+            && (IsIconic(calendar) || !IsWindowVisible(calendar));
 
         int desktop = order.IndexOf(desktopHost);
         if (desktop < 0) return;
@@ -228,8 +246,6 @@ public static class AgendaDesktopOrder {
         int afterIndex = -1;
         int calendarIndex = order.IndexOf(calendar);
         var visibleWidgets = Array.FindAll(windows, hwnd => IsWindowVisible(hwnd) && !IsIconic(hwnd));
-        bool desktopForeground = foreground != IntPtr.Zero && (foreground == shell || foreground == desktopHost);
-        bool usingDesktop = desktopForeground || (desktopPresentation == calendar && widgets.Contains(foreground));
         bool checkLift = calendar != IntPtr.Zero && usingDesktop
             && Array.Exists(visibleWidgets, hwnd => IsTopmost(hwnd) || order.IndexOf(hwnd) > desktop);
         var applications = new List<Rect>();
@@ -257,7 +273,15 @@ public static class AgendaDesktopOrder {
                 rect.Left < bounds.Right && rect.Right > bounds.Left
                 && rect.Top < bounds.Bottom && rect.Bottom > bounds.Top);
         });
-        desktopPresentation = liftWidgets ? calendar : IntPtr.Zero;
+        bool calendarTopmost = calendar != IntPtr.Zero && IsTopmost(calendar);
+        // Win+D can move the desktop or demote the calendar while Explorer keeps focus.
+        if (desktopPresentation == calendar && desktopWasTopmost && !calendarTopmost)
+            desktopCandidate = IntPtr.Zero;
+        bool desktopSettled = IsDesktopSettled(calendar, liftWidgets || restoreCalendar);
+        desktopPresentation = liftWidgets && desktopSettled ? calendar : IntPtr.Zero;
+        desktopWasTopmost = desktopPresentation != IntPtr.Zero && calendarTopmost;
+        if (desktopSettled && restoreCalendar)
+            ShowWindowAsync(calendar, 4); // SW_SHOWNOACTIVATE
         if (calendar != IntPtr.Zero) {
             Rect bounds;
             if (order.IndexOf(foreground) > desktop && !widgets.Contains(foreground)
@@ -267,6 +291,7 @@ public static class AgendaDesktopOrder {
         }
 
         if (liftWidgets) {
+            if (!desktopSettled) return;
             int previous = -1;
             bool alreadyOrdered = true;
             foreach (var hwnd in visibleWidgets) {
@@ -287,9 +312,10 @@ public static class AgendaDesktopOrder {
         foreach (IntPtr hwnd in visibleWidgets) {
             int index = order.IndexOf(hwnd);
             bool topmost = IsTopmost(hwnd);
-            if (topmost) SetWindowPos(hwnd, NotTopmost, 0, 0, 0, 0, PositionOnly);
             if (moved || topmost || index <= afterIndex || index >= desktop) {
-                SetWindowPos(hwnd, after, 0, 0, 0, 0, PositionOnly);
+                // Placing a topmost window after a regular window also demotes it.
+                var anchor = topmost && after == IntPtr.Zero ? NotTopmost : after;
+                SetWindowPos(hwnd, anchor, 0, 0, 0, 0, PositionOnly);
                 moved = true;
             }
             after = hwnd;
