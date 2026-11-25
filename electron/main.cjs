@@ -55,7 +55,9 @@ const statePath = () => path.join(app.getPath('userData'), 'floating-agenda.json
 const windowBoundsPath = () => path.join(app.getPath('userData'), 'window-bounds.json');
 const notesBoundsPath = () => path.join(app.getPath('userData'), 'notes-bounds.json');
 const iconPath = () => path.join(__dirname, '..', 'build', 'icon.png');
-const utilityWindows = createUtilityWindows(iconPath, persistWorkspaceItem);
+const utilityWindows = createUtilityWindows(iconPath, persistWorkspaceItem, () => notesSync.notes.map((note, index) => ({
+  id: note.id, label: note.text.trim().split('\n')[0].slice(0, 45) || (note.images?.length ? '图片便签 ' : '空白便签 ') + (index + 1),
+})));
 
 function deliverWorkspaceRequests() {
   if (!workspaceReady || !mainWindow || mainWindow.isDestroyed()) return;
@@ -558,10 +560,13 @@ function showEditContextMenu(win, params, noteActions = []) {
       { type: 'separator' },
       { label: '全选', role: 'selectAll' },
     );
-  } else {
+  } else if (!noteActions.length) {
     return;
   }
-  if (noteActions.length) template.push({ type: 'separator' }, ...noteActions);
+  if (noteActions.length) {
+    if (template.length) template.push({ type: 'separator' });
+    template.push(...noteActions);
+  }
   focusWindow(win);
   const menu = Menu.buildFromTemplate(template);
   contextMenuWindow = win;
@@ -922,7 +927,7 @@ ipcMain.on('note:change', (event, message) => {
   if (!note || noteWindows.get(id)?.webContents !== event.sender) return;
   const patch = message.patch && typeof message.patch === 'object' ? message.patch : {};
   const next = { ...note };
-  if (!note.image && typeof patch.text === 'string') {
+  if (typeof patch.text === 'string') {
     next.text = patch.text;
     next.richText = typeof patch.richText === 'string' ? patch.richText : undefined;
   }
@@ -930,6 +935,37 @@ ipcMain.on('note:change', (event, message) => {
   const index = notesSync.notes.indexOf(note);
   if (index >= 0) notesSync.notes[index] = next;
   if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send('notes:patch', { id, patch: { text: next.text, richText: next.richText, completed: next.completed } });
+});
+
+ipcMain.handle('note:insert-image', async (event, id) => {
+  const win = noteWindows.get(id);
+  if (!win || win.isDestroyed() || win.webContents !== event.sender || !noteById(id)) return false;
+  const result = await dialog.showOpenDialog(win, {
+    title: '插入便签图片', properties: ['openFile'],
+    filters: [{ name: '图片', extensions: ['png', 'jpg', 'jpeg', 'webp'] }],
+  });
+  if (result.canceled || !result.filePaths[0]) return false;
+  const file = result.filePaths[0];
+  if ((await fs.stat(file)).size > 24 * 1024 * 1024) throw new Error('图片太大');
+  let picture = nativeImage.createFromBuffer(await fs.readFile(file));
+  if (picture.isEmpty()) throw new Error('无法读取图片');
+  const { width, height } = picture.getSize();
+  if (Math.max(width, height) > 1050) picture = picture.resize(width >= height ? { width: 1050 } : { height: 1050 });
+  const image = 'data:image/png;base64,' + picture.toPNG().toString('base64');
+  await persistWorkspaceItem({ kind: 'image-note', id: randomUUID(), image, targetNoteId: id });
+  return true;
+});
+
+ipcMain.on('task:menu', (event, payload) => {
+  if (event.sender !== mainWindow?.webContents || !payload) return;
+  const { id, x, y, editing, completed, hasSelection } = payload;
+  if (typeof id !== 'string' || !id || !Number.isFinite(x) || !Number.isFinite(y)) return;
+  showEditContextMenu(mainWindow, { x, y, isEditable: editing === true, editFlags: { canCut: hasSelection, canCopy: hasSelection } }, [{
+    label: completed ? '取消完成' : '完成当前任务',
+    click: () => {
+      if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send('task:menu-complete', { id, editing: editing === true, completed: !completed });
+    },
+  }]);
 });
 
 ipcMain.on('note:format-menu', (event, payload) => {

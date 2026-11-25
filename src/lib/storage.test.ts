@@ -26,6 +26,14 @@ describe('state normalization', () => {
     expect(saved).toMatchObject({ taskBaseFontSize: 14, taskMinFontSize: 9, dayTaskBaseFontSize: 8, dayTaskMinFontSize: 8, weekTaskBaseFontSize: 14, weekTaskMinFontSize: 11 });
   });
 
+  it('preserves legacy drawing images as editable-note attachments', () => {
+    const notes = normalizeAppState({ notes: [{ id: 'legacy-drawing', text: '', image: 'data:image/png;base64,AAAA' },
+      { id: 'mixed', text: 'Caption', images: [{ id: 'photo', src: 'data:image/jpeg;base64,BBBB' }, { id: 'bad', src: 'https://example.invalid/pic' }] }] }).notes;
+    expect(notes[0]).toMatchObject({ images: [{ id: 'legacy-drawing', src: 'data:image/png;base64,AAAA' }] });
+    expect(notes[0]).not.toHaveProperty('image');
+    expect(notes[1]).toMatchObject({ text: 'Caption', images: [{ id: 'photo', src: 'data:image/jpeg;base64,BBBB' }] });
+  });
+
   it('round-trips custom schedule card colors and ignores invalid legacy values', () => {
     const state = normalizeAppState({ tasks: [
       { id: 'custom', date: '2026-11-25', title: 'Custom', color: 'mint', cardColor: '#123ABC' },

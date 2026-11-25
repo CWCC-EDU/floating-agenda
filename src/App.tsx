@@ -93,7 +93,8 @@ export default function App() {
   useEffect(() => {
     if (!isReady) return;
     const requests = [...pendingWorkspace.current].filter(([, item]) =>
-      item.kind === 'task' ? state.tasks.some(task => task.id === item.id) : state.notes.some(note => note.id === item.id));
+      item.kind === 'task' ? state.tasks.some(task => task.id === item.id)
+        : state.notes.some(note => note.id === (item.targetNoteId ?? item.id) && note.images?.some(image => image.id === item.id)));
     function acknowledge(saved: boolean) {
       for (const [requestId] of requests) {
         if (pendingWorkspace.current.delete(requestId)) window.desktop?.workspaceSaved(requestId, saved);
@@ -124,10 +125,22 @@ export default function App() {
           : { ...current, tasks: extendRecurringTasks([...current.tasks, task], toDateKey()).tasks });
         return;
       }
+      const target = item.targetNoteId;
+      if (target && !stateRef.current.notes.some(note => note.id === target)) {
+        desktop.workspaceSaved(requestId, false);
+        return;
+      }
       pendingWorkspace.current.set(requestId, item);
-      const note = { ...newStickyNote(), id: item.id, image: item.image };
-      setState(current => current.notes.some(existing => existing.id === item.id) ? { ...current }
-        : { ...current, notes: [...current.notes, note], settings: { ...current.settings, showNotes: true } });
+      const image = { id: item.id, src: item.image };
+      setState(current => {
+        const noteId = target ?? item.id;
+        const existing = current.notes.find(note => note.id === noteId);
+        const notes = existing ? current.notes.map(note => note.id !== noteId ? note : {
+          ...note, open: true,
+          images: note.images?.some(attachment => attachment.id === image.id) ? note.images : [...(note.images ?? []), image],
+        }) : target ? current.notes : [...current.notes, { ...newStickyNote(), id: noteId, images: [image] }];
+        return { ...current, notes, settings: { ...current.settings, showNotes: true } };
+      });
     });
     desktop.workspaceReady();
     return dispose;
@@ -548,12 +561,25 @@ export default function App() {
     setToast('已删除该重复任务的全部日程');
   }
 
-  function toggleTaskCompletion(task: Task) {
-    setState((current) => {
-      const updated = { ...task, completed: !task.completed, completedAt: task.completed ? undefined : new Date().toISOString() };
-      return { ...current, tasks: current.tasks.map((item) => item.id === task.id ? updated : item) };
-    });
+  const setTaskCompletion = useCallback((id: string, completed: boolean) => {
+    setState(current => ({ ...current, tasks: current.tasks.map(task => task.id === id && task.completed !== completed
+      ? { ...task, completed, completedAt: completed ? new Date().toISOString() : undefined } : task) }));
     playSound(state.settings.editSaveSound);
+  }, [state.settings.editSaveSound]);
+
+  useEffect(() => window.desktop?.onTaskMenuComplete(({ id, editing, completed }) => {
+    if (!editing) setTaskCompletion(id, completed);
+  }), [setTaskCompletion]);
+
+  function toggleTaskCompletion(task: Task) {
+    setTaskCompletion(task.id, !task.completed);
+  }
+
+  function openTaskMenu(task: Task, event: MouseEvent<HTMLElement>) {
+    if (!window.desktop) return;
+    event.preventDefault();
+    event.stopPropagation();
+    window.desktop.showTaskMenu({ id: task.id, x: event.clientX, y: event.clientY, editing: false, completed: task.completed });
   }
 
   function completeSelectedTask() {
@@ -587,7 +613,7 @@ export default function App() {
     const color = background ? readableTextColor(background, defaultTaskColor, true) : taskColor(task);
     const style = { '--task-item-color': color, '--task-card-background': background } as CSSProperties;
     return (
-      <div className={`calendar-task ${task.completed ? 'is-completed' : ''} ${rolledOver ? 'is-rolled-over' : ''}`} data-color={task.color} data-background={state.settings.taskTextBackground} data-rollover={rolledOver ? 'true' : undefined} data-card-color={background ? 'true' : undefined} style={style} key={task.id}>
+      <div className={`calendar-task ${task.completed ? 'is-completed' : ''} ${rolledOver ? 'is-rolled-over' : ''}`} data-color={task.color} data-background={state.settings.taskTextBackground} data-rollover={rolledOver ? 'true' : undefined} data-card-color={background ? 'true' : undefined} style={style} key={task.id} onContextMenu={event => openTaskMenu(task, event)}>
         {state.settings.showCompletedCheckbox && <input className="task-checkbox" type="checkbox" aria-label={`完成 ${task.title}`} checked={task.completed} onClick={(event) => event.stopPropagation()} onChange={() => toggleTaskCompletion(task)} />}
         <button className="calendar-task-label" type="button" title={`${task.time ? `${taskTimeLabel(task.time, task.endTime)} ` : ''}${task.title}${rolledOver ? ` · 已顺延 ${task.rolloverCount} 次` : ''}`} onClick={(event) => { event.stopPropagation(); goToTask(task); }}>
           {showNumber && state.settings.bulletStyle !== 'none' && <span className="task-number">{state.settings.bulletStyle === 'number' ? `${taskIndex + 1}.` : '•'}</span>}
@@ -832,7 +858,7 @@ export default function App() {
           view={calendarView} dates={scheduleDates} today={today} selectedDate={selectedDate} settings={state.settings}
           getDayTasks={getDayTasks} getGhostTasks={getGhostTasks}
           renderTask={(task, index) => renderTask(task, index, false)} renderGhostTask={renderGhostTask} taskColor={taskColor}
-          onSelectDate={setSelectedDate} onOpenTask={goToTask} onCreate={(date, initialTime) => {
+          onSelectDate={setSelectedDate} onOpenTask={goToTask} onTaskMenu={openTaskMenu} onCreate={(date, initialTime) => {
             setSelectedDate(date);
             setEditor({ date, initialTime });
           }}

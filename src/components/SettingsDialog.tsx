@@ -198,7 +198,8 @@ function ChoiceCards<T extends string>({ value, options, kind, onChange }: { val
 
 function shortcutFromEvent(event: KeyboardEvent<HTMLInputElement>): string {
   if (['Control', 'Shift', 'Alt', 'Meta'].includes(event.key)) return '';
-  if (!event.ctrlKey && !event.altKey && !event.metaKey) return '';
+  const functionKey = /^F(?:[1-9]|1[0-9]|2[0-4])$/.test(event.key);
+  if (!functionKey && !event.ctrlKey && !event.altKey && !event.metaKey) return '';
   const parts: string[] = [];
   if (event.ctrlKey) parts.push('Control');
   if (event.altKey) parts.push('Alt');
@@ -212,7 +213,7 @@ function ShortcutRow({ title, setting, value, disabled, onChange }: { title: str
   const usesCustomShortcut = setting === 'quickCaptureShortcut';
   return (
     <div className="setting-row shortcut-setting-row">
-      <div><strong>{title}</strong><p>点击快捷键框，再按下新的组合键</p></div>
+      <div><strong>{title}</strong><p>点击快捷键框，再按组合键或 F1–F24</p></div>
       <input className="shortcut-input" aria-label={`${title}快捷键`} value={value} placeholder={usesCustomShortcut ? '未设置' : '已关闭'} readOnly disabled={disabled || (!usesCustomShortcut && !value)} onKeyDown={(event) => {
         event.preventDefault();
         if (event.key === 'Escape' || event.key === 'Backspace' || event.key === 'Delete') onChange(setting, '');
@@ -241,7 +242,7 @@ export function SettingsDialog({ initialCategory, localSkin, onLocalSkinChange, 
   const numberOptions = (min: number, max: number, unit = '') => Array.from({ length: max - min + 1 }, (_, index) => ({ value: min + index, label: `${min + index}${unit}` }));
   const backgroundOptions: { value: TextBackground; label: string }[] = [{ value: 'none', label: '关闭' }, { value: 'soft', label: '柔和' }, { value: 'solid', label: '实色' }];
   const soundOptions: { value: SoundEffect; label: string }[] = [{ value: 'none', label: '无' }, { value: 'tick', label: '滴答' }, { value: 'chime', label: '小星星' }];
-  const closedBlankNotes = notes.filter((note) => !note.open && !note.image && !note.text.trim());
+  const closedBlankNotes = notes.filter((note) => !note.open && !note.images?.length && !note.text.trim());
   const title = CATEGORIES.find((item) => item.id === category)?.label ?? '日历设置';
 
   async function checkUpdates() {
@@ -403,8 +404,8 @@ export function SettingsDialog({ initialCategory, localSkin, onLocalSkinChange, 
                   )}
                   {notes.map((note) => (
                     <div className="settings-note-entry" key={note.id}>
-                      <button className="settings-note-row" type="button" title={note.image ? '画板便签' : note.text || '空白便签'} onClick={() => onOpenNote(note.id)}>
-                        <span>{note.image ? '画板便签' : (note.text.trim().split('\n')[0] || '空白便签').slice(0, 40)}</span>
+                      <button className="settings-note-row" type="button" title={note.text || (note.images?.length ? '图片便签' : '空白便签')} onClick={() => onOpenNote(note.id)}>
+                        <span>{(note.text.trim().split('\n')[0] || (note.images?.length ? '图片便签' : '空白便签')).slice(0, 40)}</span>
                         <em className={note.open ? 'is-open' : ''}>{note.open ? '已打开' : '已关闭'}</em>
                       </button>
                       <button className="settings-note-destroy" type="button" onClick={() => {

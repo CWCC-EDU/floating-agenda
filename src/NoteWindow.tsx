@@ -1,10 +1,18 @@
-import { Minus, Palette, Plus, Strikethrough, StickyNote as StickyNoteIcon, X } from 'lucide-react';
+import { Bold, ImagePlus, Italic, List, Minus, Palette, Plus, Strikethrough, StickyNote as StickyNoteIcon, Underline, X } from 'lucide-react';
 import { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react';
 import type { CSSProperties, MouseEvent, PointerEvent } from 'react';
 import type { NoteFormat, NotePatch, NoteStatePayload } from './types';
-import { NOTE_COLORS, cleanNoteHtml, noteCheckHtml, restoreNoteCaret, selectNoteLine, setNoteCheck } from './lib/noteFormat';
+import { NOTE_COLORS, cleanNoteHtml, noteCheckHtml, setNoteCheck } from './lib/noteFormat';
 
 const NOTE_HEIGHT_PADDING = 8;
+const TEXT_TOOLS = [
+  { label: '加粗', icon: Bold, command: 'bold' },
+  { label: '斜体', icon: Italic, command: 'italic' },
+  { label: '下划线', icon: Underline, command: 'underline' },
+  { label: '删除线', icon: Strikethrough, command: 'strikeThrough' },
+  { label: '项目符号', icon: List, command: 'insertUnorderedList' },
+] as const;
+type FormatCommand = typeof TEXT_TOOLS[number]['command'];
 type NoteContent = Pick<NotePatch, 'text' | 'richText'>;
 
 export default function NoteWindow() {
@@ -16,9 +24,9 @@ export default function NoteWindow() {
   const panelRef = useRef<HTMLElement>(null);
   const editorRef = useRef<HTMLDivElement>(null);
   const [hasSelection, setHasSelection] = useState(false);
-  const [hasCaret, setHasCaret] = useState(false);
   const [showColors, setShowColors] = useState(false);
-  const caret = useRef<{ node: Node; offset: number } | null>(null);
+  const [imageStatus, setImageStatus] = useState('');
+  const [insertingImage, setInsertingImage] = useState(false);
   const formatRange = useRef<Range | null>(null);
   const shownContent = useRef<NoteContent | null>(null);
   const pendingContent = useRef<NoteContent | null>(null);
@@ -75,44 +83,42 @@ export default function NoteWindow() {
     shownContent.current = { text: noteText, richText };
   }, [noteText, richText]);
 
-  const applyFormat = useCallback((format: NoteFormat) => {
+  const applyFormat = useCallback((format: NoteFormat | { type: FormatCommand }) => {
     const editor = editorRef.current;
     const range = formatRange.current;
-    if (!editor || (format.type === 'color' && (!range || range.collapsed))) return;
-
-    editor.focus({ preventScroll: true });
     const selection = window.getSelection();
-    if (format.type === 'strike') {
-      const position = caret.current;
-      if (!position || !selection || !selectNoteLine(editor, selection, position.node, position.offset)) return;
-      const before = document.createRange();
-      before.setStart(editor, 0);
-      const limit = position.node.nodeType === Node.TEXT_NODE ? position.node.textContent?.length ?? 0 : position.node.childNodes.length;
-      before.setEnd(position.node, Math.min(position.offset, limit));
-      const textOffset = before.toString().length;
-      const mixed = document.queryCommandIndeterm('strikeThrough');
-      document.execCommand('strikeThrough');
-      restoreNoteCaret(editor, selection, textOffset, position.offset === 0);
-      if (mixed && selection.focusNode && selectNoteLine(editor, selection, selection.focusNode, selection.focusOffset)) {
-        if (!document.queryCommandState('strikeThrough')) document.execCommand('strikeThrough');
-        restoreNoteCaret(editor, selection, textOffset, position.offset === 0);
-      }
-      if (selection.focusNode) caret.current = { node: selection.focusNode, offset: selection.focusOffset };
-      saveContent();
-      return;
-    }
-    if (range && selection && editor.contains(range.commonAncestorContainer)) {
+    if (!editor || !selection) return;
+    const containsRange = range && editor.contains(range.commonAncestorContainer);
+    if (format.type !== 'checkbox' && (!containsRange || range.collapsed)) return;
+    editor.focus({ preventScroll: true });
+    if (containsRange) {
       selection.removeAllRanges();
       selection.addRange(range);
     }
     if (format.type === 'checkbox') {
-      selection?.collapseToEnd();
+      if (!containsRange) selection.collapse(editor, editor.childNodes.length);
+      selection.collapseToEnd();
       document.execCommand('insertHTML', false, noteCheckHtml(false) + '&nbsp;');
     } else if (format.type === 'color') {
       document.execCommand('foreColor', false, format.color || defaultColor);
+    } else {
+      document.execCommand(format.type === 'strike' ? 'strikeThrough' : format.type);
     }
     saveContent();
   }, [defaultColor, saveContent]);
+
+  async function insertImage() {
+    if (!desktop || insertingImage) return;
+    setInsertingImage(true);
+    setImageStatus('');
+    try {
+      await desktop.insertNoteImage(noteId);
+    } catch {
+      setImageStatus('无法插入图片，请检查文件大小和格式。');
+    } finally {
+      setInsertingImage(false);
+    }
+  }
 
   useEffect(() => desktop?.onNoteFormat(applyFormat), [applyFormat, desktop]);
 
@@ -124,8 +130,6 @@ export default function NoteWindow() {
       const range = selection.getRangeAt(0);
       if (!editor.contains(range.commonAncestorContainer)) return;
       formatRange.current = range.cloneRange();
-      caret.current = { node: selection.focusNode, offset: selection.focusOffset };
-      setHasCaret(true);
       setHasSelection(!range.collapsed);
       if (range.collapsed) setShowColors(false);
     }
@@ -204,7 +208,7 @@ export default function NoteWindow() {
       <aside ref={panelRef} className="notes-panel note-window-panel" style={style} aria-label="桌面便签">
         <header title="按住拖动便签" onPointerDown={startDrag} onPointerMove={moveDrag} onPointerUp={stopDrag} onPointerCancel={stopDrag} onLostPointerCapture={stopDrag}>
           <StickyNoteIcon size={15} />
-          <strong>{note.image ? '画板便签' : '便签'}</strong>
+          <strong>便签</strong>
           <button type="button" aria-label="新增便签" title="新增便签" onClick={() => desktop?.newNote()}><Plus size={15} /></button>
           <button type="button" aria-label="最小化便签" title="最小化便签（保留内容）" onClick={() => desktop?.closeNote(noteId)}><Minus size={15} /></button>
           <button type="button" aria-label="销毁便签" title="销毁便签" onClick={() => { if (window.confirm('永久销毁这张便签？')) desktop?.deleteNote(noteId); }}><X size={15} /></button>
@@ -212,7 +216,7 @@ export default function NoteWindow() {
         <div className="note-window-body">
           <div className={`sticky-note ${note.completed ? 'is-completed' : ''}`} data-background={appearance.noteTextBackground}>
             {appearance.showNoteCheckbox && <input type="checkbox" aria-label="完成便签" checked={note.completed} onChange={(event) => update({ completed: event.target.checked })} />}
-            {note.image ? <img className="drawing-note-image" src={note.image} alt="画板便签" draggable={false} /> : <div
+            <div className="note-content"><div
               ref={editorRef}
               className="note-rich-editor"
               contentEditable
@@ -233,13 +237,19 @@ export default function NoteWindow() {
                 document.execCommand('insertText', false, event.clipboardData.getData('text/plain'));
               }}
               onDrop={(event) => event.preventDefault()}
-            />}
+            />
+              {Boolean(note.images?.length) && <div className="note-images">
+                {note.images?.map(image => <img key={image.id} className="drawing-note-image" src={image.src} alt="便签图片" draggable={false} />)}
+              </div>}
+            </div>
           </div>
         </div>
-        {!note.image && <footer className="note-format-bar" aria-label="便签文字格式" onMouseDown={(event) => event.preventDefault()}>
+        <footer className="note-format-bar" aria-label="便签文字格式" onMouseDown={(event) => event.preventDefault()}>
           <div className="note-format-actions">
-            <button type="button" disabled={!hasSelection} aria-expanded={showColors} title="选择文字后更改字体颜色" onClick={() => setShowColors((open) => !open)}><Palette size={13} />字体颜色</button>
-            <button type="button" disabled={!hasCaret} title="切换光标所在行的删除线" onClick={() => { setShowColors(false); applyFormat({ type: 'strike' }); }}><Strikethrough size={13} />删除线</button>
+            {TEXT_TOOLS.map(({ label, icon: Icon, command }) => <button key={command} type="button" disabled={!hasSelection}
+              aria-label={label} title={label} onClick={() => { setShowColors(false); applyFormat({ type: command }); }}><Icon size={14} /></button>)}
+            <button type="button" disabled={insertingImage} aria-label="插入图片" title="插入图片" onClick={() => void insertImage()}><ImagePlus size={14} /></button>
+            <button type="button" disabled={!hasSelection} aria-expanded={showColors} aria-label="字体颜色" title="选择文字后更改字体颜色" onClick={() => setShowColors((open) => !open)}><Palette size={14} /></button>
           </div>
           {showColors && hasSelection && <div className="note-format-colors" aria-label="字体颜色选项">
             {[{ label: '默认颜色', value: '' }, ...NOTE_COLORS].map(({ label, value }) => (
@@ -249,7 +259,8 @@ export default function NoteWindow() {
               }} />
             ))}
           </div>}
-        </footer>}
+          {imageStatus && <span className="note-format-status" role="status">{imageStatus}</span>}
+        </footer>
       </aside>
     </div>
   );

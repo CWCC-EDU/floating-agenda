@@ -55,11 +55,17 @@ export interface Task {
   seriesId?: string;
 }
 
+export interface NoteImage {
+  id: string;
+  src: string;
+}
+
 export interface StickyNote {
   id: string;
   text: string;
   richText?: string;
   image?: string;
+  images?: NoteImage[];
   completed: boolean;
   createdAt: string;
   open?: boolean;
@@ -166,7 +172,7 @@ export interface AppState {
 }
 
 export type WorkspaceItem = { kind: 'task'; id: string; draft: QuickTaskDraft }
-  | { kind: 'image-note'; id: string; image: string };
+  | { kind: 'image-note'; id: string; image: string; targetNoteId?: string };
 
 export interface WorkspaceRequest {
   requestId: string;
@@ -273,7 +279,11 @@ export interface DesktopBridge {
   submitQuickTask: (id: string, draft: QuickTaskDraft) => Promise<void>;
   openDrawingBoard: () => Promise<void>;
   exportDrawing: (bytes: Uint8Array) => Promise<boolean>;
-  saveDrawingNote: (id: string, bytes: Uint8Array) => Promise<void>;
+  saveDrawingNote: (id: string, bytes: Uint8Array, targetNoteId?: string) => Promise<void>;
+  listDrawingNotes: () => Promise<{ id: string; label: string }[]>;
+  insertNoteImage: (id: string) => Promise<boolean>;
+  showTaskMenu: (request: { id: string; x: number; y: number; editing: boolean; completed: boolean; hasSelection?: boolean }) => void;
+  onTaskMenuComplete: (callback: (request: { id: string; editing: boolean; completed: boolean }) => void) => () => void;
   onWorkspaceRequest: (callback: (request: WorkspaceRequest) => void) => () => void;
   workspaceReady: () => void;
   workspaceSaved: (requestId: string, saved: boolean) => void;

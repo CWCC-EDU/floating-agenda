@@ -7,7 +7,7 @@ export const NOTE_COLORS = [
   { label: '紫色', value: '#c4a5fa' },
 ] as const;
 
-const SIMPLE_TAGS = new Set(['DIV', 'P', 'BR', 'B', 'STRONG', 'I', 'EM', 'U', 'S', 'STRIKE', 'DEL']);
+const SIMPLE_TAGS = new Set(['DIV', 'P', 'BR', 'B', 'STRONG', 'I', 'EM', 'U', 'S', 'STRIKE', 'DEL', 'UL', 'LI']);
 const DROP_TAGS = new Set(['SCRIPT', 'STYLE', 'IFRAME', 'OBJECT', 'SVG', 'MATH', 'TEMPLATE']);
 
 function safeColor(value: string): string {
@@ -35,29 +35,6 @@ export function noteCheckHtml(checked: boolean): string {
   return check.outerHTML;
 }
 
-export function selectNoteLine(editor: HTMLElement, selection: Selection, node: Node, offset: number): boolean {
-  if (!editor.contains(node)) return false;
-  const limit = node.nodeType === Node.TEXT_NODE ? node.textContent?.length ?? 0 : node.childNodes.length;
-  selection.collapse(node, Math.min(offset, limit));
-  selection.modify('move', 'backward', 'paragraphboundary');
-  selection.modify('extend', 'forward', 'paragraphboundary');
-  return !selection.isCollapsed && selection.rangeCount > 0
-    && editor.contains(selection.getRangeAt(0).commonAncestorContainer);
-}
-
-export function restoreNoteCaret(editor: HTMLElement, selection: Selection, textOffset: number, preferStart: boolean) {
-  const walker = document.createTreeWalker(editor, NodeFilter.SHOW_TEXT);
-  for (let node = walker.nextNode() as Text | null; node; node = walker.nextNode() as Text | null) {
-    if (!node.length) continue;
-    if (textOffset < node.length || (textOffset === node.length && !preferStart)) {
-      selection.collapse(node, textOffset);
-      return;
-    }
-    textOffset -= node.length;
-  }
-  selection.collapse(editor, editor.childNodes.length);
-}
-
 export function cleanNoteHtml(html: string): string {
   const source = document.createElement('template');
   source.innerHTML = html;
@@ -77,12 +54,16 @@ export function cleanNoteHtml(html: string): string {
 
     const tag = node.tagName;
     const color = safeColor(node.style.color || (tag === 'FONT' ? node.getAttribute('color') ?? '' : ''));
-    const strike = node.style.textDecorationLine.split(' ').includes('line-through');
+    const decoration = node.style.textDecorationLine.split(' ').filter(value => value === 'line-through' || value === 'underline').join(' ');
+    const bold = node.style.fontWeight === 'bold' || Number(node.style.fontWeight) >= 600;
+    const italic = node.style.fontStyle === 'italic';
     let destination = parent;
-    if (SIMPLE_TAGS.has(tag) || color || strike) {
+    if (SIMPLE_TAGS.has(tag) || color || decoration || bold || italic) {
       destination = document.createElement(SIMPLE_TAGS.has(tag) ? tag : 'span');
       if (color) destination.style.color = color;
-      if (strike) destination.style.textDecorationLine = 'line-through';
+      if (decoration) destination.style.textDecorationLine = decoration;
+      if (bold) destination.style.fontWeight = 'bold';
+      if (italic) destination.style.fontStyle = 'italic';
       parent.append(destination);
     }
     node.childNodes.forEach((child) => copy(child, destination));

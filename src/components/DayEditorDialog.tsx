@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState, type ClipboardEvent, type CSSProperties, type KeyboardEvent } from 'react';
+import { useCallback, useEffect, useRef, useState, type ClipboardEvent, type CSSProperties, type KeyboardEvent, type MouseEvent } from 'react';
 import { ArrowRight, Check, Plus, Repeat2, Trash2, X } from 'lucide-react';
 import { TASK_PALETTE } from '../lib/appearance';
 import { fullDateLabel } from '../lib/date';
@@ -325,16 +325,31 @@ export function DayEditorDialog({ date, tasks, initialTaskId, initialTime, setti
     commitLines(lines, caretLine);
   }
 
-  function updateSelected(updates: Partial<Task>) {
-    if (!selected) return;
+  const updateTask = useCallback((id: string, updates: Partial<Task>) => {
     setRows((current) => current.map((row) => {
-      if (row.id !== selected.id) return row;
+      if (row.id !== id) return row;
       const next = { ...row, ...updates };
       if (updates.completed !== undefined && updates.completed !== row.completed) {
         next.completedAt = updates.completed ? new Date().toISOString() : undefined;
       }
       return next;
     }));
+  }, []);
+
+  useEffect(() => window.desktop?.onTaskMenuComplete(({ id, editing, completed }) => {
+    if (editing) updateTask(id, { completed });
+  }), [updateTask]);
+
+  function updateSelected(updates: Partial<Task>) {
+    if (selected) updateTask(selected.id, updates);
+  }
+
+  function openTaskMenu(event: MouseEvent<HTMLElement>, index: number, hasSelection: boolean) {
+    const row = rows[index];
+    if (!window.desktop || !row?.title.trim()) return;
+    event.preventDefault();
+    setActiveLine(index);
+    window.desktop.showTaskMenu({ id: row.id, x: event.clientX, y: event.clientY, editing: true, completed: row.completed, hasSelection });
   }
 
   function focusRow(index: number) {
@@ -500,6 +515,7 @@ export function DayEditorDialog({ date, tasks, initialTaskId, initialTime, setti
                     onChange={(event) => updateRowTitle(index, event.target.value)}
                     onFocus={() => setActiveLine(index)}
                     onClick={() => setActiveLine(index)}
+                    onContextMenu={event => openTaskMenu(event, index, event.currentTarget.selectionStart !== event.currentTarget.selectionEnd)}
                     onKeyDown={(event) => onRowKeyDown(index, event)}
                     onPaste={(event) => onRowPaste(index, event)}
                   />
@@ -534,6 +550,11 @@ export function DayEditorDialog({ date, tasks, initialTaskId, initialTime, setti
               onKeyDown={onEditorKeyDown}
               onKeyUp={syncActiveLine}
               onClick={syncActiveLine}
+              onContextMenu={event => {
+                const line = (event.target as HTMLElement).closest('.editor-line');
+                const index = line ? Array.from(event.currentTarget.children).indexOf(line) : selectedIndex;
+                openTaskMenu(event, index, window.getSelection()?.isCollapsed === false);
+              }}
               onPaste={onEditorPaste}
               onScroll={() => {
                 if (gutterRef.current && editorRef.current) gutterRef.current.scrollTop = editorRef.current.scrollTop;

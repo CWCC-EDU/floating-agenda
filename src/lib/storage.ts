@@ -1,4 +1,4 @@
-import type { AppState, Settings, StickyNote, Task, TaskColor } from '../types';
+import type { AppState, NoteImage, Settings, StickyNote, Task, TaskColor } from '../types';
 import { DEFAULT_RECURRENCE, isDateKey, normalizeRecurrence, REPEAT_OPTIONS } from './recurrence';
 import { isClockTime, isTaskTimeRange } from './taskTime';
 
@@ -160,13 +160,16 @@ function normalizeTask(value: Partial<Task>): Task | null {
 
 function normalizeNote(value: Partial<StickyNote>): StickyNote | null {
   if (!value.id || typeof value.text !== 'string') return null;
-  const image = typeof value.image === 'string' && value.image.length <= 7_000_000
-    && /^data:image\/png;base64,[A-Za-z0-9+/]+={0,2}$/.test(value.image) ? value.image : undefined;
+  const validImage = (src: unknown): src is string => typeof src === 'string' && src.length <= 7_000_000
+    && /^data:image\/(png|jpeg);base64,[A-Za-z0-9+/]+={0,2}$/.test(src);
+  const images: NoteImage[] = Array.isArray(value.images) ? value.images.filter(image =>
+    image && typeof image.id === 'string' && validImage(image.src)) : [];
+  if (validImage(value.image) && !images.some(image => image.id === value.id)) images.unshift({ id: value.id, src: value.image });
   return {
     id: value.id,
     text: value.text,
     ...(typeof value.richText === 'string' ? { richText: value.richText } : {}),
-    ...(image ? { image } : {}),
+    ...(images.length ? { images } : {}),
     completed: Boolean(value.completed),
     createdAt: value.createdAt ?? new Date().toISOString(),
     open: value.open === true,

@@ -8,7 +8,15 @@ contextBridge.exposeInMainWorld('desktop', {
   submitQuickTask: (id, draft) => ipcRenderer.invoke('quick:submit', id, draft),
   openDrawingBoard: () => ipcRenderer.invoke('drawing:open'),
   exportDrawing: (bytes) => ipcRenderer.invoke('drawing:export', bytes),
-  saveDrawingNote: (id, bytes) => ipcRenderer.invoke('drawing:note', id, bytes),
+  saveDrawingNote: (id, bytes, targetNoteId) => ipcRenderer.invoke('drawing:note', id, bytes, targetNoteId),
+  listDrawingNotes: () => ipcRenderer.invoke('drawing:notes'),
+  insertNoteImage: (id) => ipcRenderer.invoke('note:insert-image', id),
+  showTaskMenu: (request) => ipcRenderer.send('task:menu', request),
+  onTaskMenuComplete: (callback) => {
+    const listener = (_event, request) => callback(request);
+    ipcRenderer.on('task:menu-complete', listener);
+    return () => ipcRenderer.removeListener('task:menu-complete', listener);
+  },
   onWorkspaceRequest: (callback) => {
     const listener = (_event, request) => callback(request);
     ipcRenderer.on('workspace:add', listener);

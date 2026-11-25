@@ -25,6 +25,7 @@ interface ScheduleViewProps {
   taskColor(task: Task): string;
   onSelectDate(date: string): void;
   onOpenTask(task: Task, displayedDate: string): void;
+  onTaskMenu(task: Task, event: MouseEvent<HTMLElement>): void;
   onCreate(date: string, time?: TaskTime): void;
 }
 
@@ -105,7 +106,7 @@ function ScheduleTaskCell({ date, kind, preferredFontSize, minFontSize, rest, on
 
 export function ScheduleView({
   view, dates, today, selectedDate, settings,
-  getDayTasks, getGhostTasks, renderTask, renderGhostTask, taskColor, onSelectDate, onOpenTask, onCreate,
+  getDayTasks, getGhostTasks, renderTask, renderGhostTask, taskColor, onSelectDate, onOpenTask, onTaskMenu, onCreate,
 }: ScheduleViewProps) {
   const timeline = view === 'day' ? settings.showDayTimeAxis : settings.showWeekTimeAxis;
   const baseFontSize = view === 'day' ? settings.dayTaskBaseFontSize : settings.weekTaskBaseFontSize;
@@ -230,6 +231,7 @@ export function ScheduleView({
                     '--task-card-foreground': background ? readableTextColor(background, '', true) : undefined,
                   } as CSSProperties}
                   title={taskTimeLabel(event.task.time, event.task.endTime) + ' ' + event.task.title}
+                  onContextMenu={mouseEvent => onTaskMenu(event.task, mouseEvent)}
                   onClick={() => onOpenTask(event.task, date)}>
                   <span className="schedule-event-title">{event.task.completed && settings.showCompletedIcon && <Check size={11} />}{event.task.title}</span>
                   {event.end - event.start >= 40 && <small>{event.continuing ? '00:00–' + clockTime(event.to) : taskTimeLabel(event.task.time, event.task.endTime)}</small>}

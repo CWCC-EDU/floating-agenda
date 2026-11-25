@@ -136,8 +136,9 @@ export function NotesPanel({ notes, settings, onChange, onClose }: NotesPanelPro
           <div className={`sticky-note ${note.completed ? 'is-completed' : ''}`} data-background={settings.noteTextBackground} key={note.id}>
             <span className="note-bullet">{settings.noteBulletStyle === 'number' ? `${index + 1}.` : settings.noteBulletStyle === 'dot' ? '•' : ''}</span>
             {settings.showNoteCheckbox && <input type="checkbox" aria-label={`完成便签 ${index + 1}`} checked={note.completed} onChange={(event) => updateNote(note.id, { completed: event.target.checked })} />}
-            {note.image ? <img className="drawing-note-image" src={note.image} alt="画板便签" draggable={false} />
-              : <textarea aria-label={`便签 ${index + 1}`} value={note.text} placeholder="写点什么…" rows={3} onChange={(event) => updateNote(note.id, { text: event.target.value, richText: undefined })} />}
+            <div className="note-content"><textarea aria-label={`便签 ${index + 1}`} value={note.text} placeholder="写点什么…" rows={3} onChange={(event) => updateNote(note.id, { text: event.target.value, richText: undefined })} />
+              {note.images?.map(image => <img key={image.id} className="drawing-note-image" src={image.src} alt="便签图片" draggable={false} />)}
+            </div>
             <button className="note-delete" type="button" aria-label={`删除便签 ${index + 1}`} onClick={() => {
               if (window.confirm('删除这条便签？')) onChange(notes.filter((item) => item.id !== note.id));
             }}><Trash2 size={13} /></button>

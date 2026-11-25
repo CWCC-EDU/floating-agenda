@@ -1,4 +1,4 @@
-import { Download, Eraser, Image, PenLine, RotateCcw, StickyNote, Trash2, Undo2 } from 'lucide-react';
+import { Download, Eraser, Image, PenLine, Redo2, RotateCcw, StickyNote, Trash2, Undo2 } from 'lucide-react';
 import { useEffect, useRef, useState, type PointerEvent } from 'react';
 
 type Brush = 'pen' | 'marker' | 'eraser';
@@ -78,17 +78,22 @@ async function encodeBoard(strokes: Stroke[], area: DOMRect) {
 export default function DrawingBoardWindow() {
   const canvas = useRef<HTMLCanvasElement>(null);
   const clearDialog = useRef<HTMLDialogElement>(null);
+  const noteDialog = useRef<HTMLDialogElement>(null);
   const strokes = useRef<Stroke[]>([]);
+  const undone = useRef<Stroke[]>([]);
   const drawing = useRef<{ id: number; stroke: Stroke } | null>(null);
   const viewport = useRef<Viewport>(HOME_VIEW);
   const pan = useRef<{ id: number; pointer: Point; origin: Point } | null>(null);
   const frame = useRef<number | null>(null);
-  const newNoteId = useRef<string | null>(null);
+  const noteRequest = useRef<{ id: string; target?: string } | null>(null);
+  const [noteTargets, setNoteTargets] = useState<{ id: string; label: string }[]>([]);
+  const [targetNote, setTargetNote] = useState('');
   const saving = useRef(false);
   const [brush, setBrush] = useState<Brush>('pen');
   const [width, setWidth] = useState(4);
   const [color, setColor] = useState('#263e47');
   const [strokeCount, setStrokeCount] = useState(0);
+  const [redoCount, setRedoCount] = useState(0);
   const [busy, setBusy] = useState(false);
   const [feedback, setFeedback] = useState('');
   const [zoomPercent, setZoomPercent] = useState(100);
@@ -107,11 +112,23 @@ export default function DrawingBoardWindow() {
     });
   }
 
+  function stepHistory(redo: boolean) {
+    if (drawing.current || pan.current) return;
+    const source = redo ? undone.current : strokes.current;
+    const target = redo ? strokes.current : undone.current;
+    const stroke = source.pop();
+    if (!stroke) return;
+    target.push(stroke);
+    setStrokeCount(strokes.current.length);
+    setRedoCount(undone.current.length);
+    schedulePaint();
+  }
+
   useEffect(() => {
     const surface = canvas.current;
     if (!surface) return;
     const zoomAtPointer = (event: WheelEvent) => {
-      if (!document.hasFocus() || clearDialog.current?.open || drawing.current || pan.current) return;
+      if (!document.hasFocus() || clearDialog.current?.open || noteDialog.current?.open || drawing.current || pan.current) return;
       event.preventDefault();
       const current = viewport.current;
       const delta = event.deltaY * (event.deltaMode === 1 ? 16 : event.deltaMode === 2 ? surface.clientHeight : 1);
@@ -125,6 +142,14 @@ export default function DrawingBoardWindow() {
       setZoomPercent(Math.round(zoom * 100));
       schedulePaint();
     };
+    function historyShortcut(event: KeyboardEvent) {
+      if (!event.ctrlKey || event.altKey || event.metaKey || event.shiftKey || clearDialog.current?.open || noteDialog.current?.open) return;
+      const key = event.key.toLowerCase();
+      if (key !== 'z' && key !== 'y') return;
+      event.preventDefault();
+      stepHistory(key === 'y');
+    }
+    window.addEventListener('keydown', historyShortcut);
     const observer = new ResizeObserver(schedulePaint);
     observer.observe(surface);
     surface.addEventListener('wheel', zoomAtPointer, { passive: false });
@@ -132,6 +157,7 @@ export default function DrawingBoardWindow() {
     schedulePaint();
     return () => {
       observer.disconnect();
+      window.removeEventListener('keydown', historyShortcut);
       surface.removeEventListener('wheel', zoomAtPointer);
       window.removeEventListener('resize', schedulePaint);
       if (frame.current !== null) cancelAnimationFrame(frame.current);
@@ -191,6 +217,8 @@ export default function DrawingBoardWindow() {
     if (!active || active.id !== event.pointerId) return;
     if (event.type === 'pointerup') move(event);
     strokes.current.push(active.stroke);
+    undone.current = [];
+    setRedoCount(0);
     drawing.current = null;
     setStrokeCount(strokes.current.length);
     schedulePaint();
@@ -198,6 +226,8 @@ export default function DrawingBoardWindow() {
 
   function clearBoard() {
     strokes.current = [];
+    undone.current = [];
+    setRedoCount(0);
     drawing.current = null;
     pan.current = null;
     setPanning(false);
@@ -207,7 +237,19 @@ export default function DrawingBoardWindow() {
     schedulePaint();
   }
 
-  async function save(mode: 'export' | 'note') {
+  async function chooseNote() {
+    if (!window.desktop) return;
+    try {
+      setFeedback('');
+      setNoteTargets(await window.desktop.listDrawingNotes());
+      setTargetNote('');
+      noteDialog.current?.showModal();
+    } catch {
+      setFeedback('无法读取便签列表，请重试。');
+    }
+  }
+
+  async function save(mode: 'export' | 'note', target?: string) {
     const desktop = window.desktop;
     if (!desktop || !canvas.current || strokes.current.length === 0 || saving.current) return;
     saving.current = true;
@@ -218,10 +260,11 @@ export default function DrawingBoardWindow() {
       if (mode === 'export') {
         if (await desktop.exportDrawing(png)) setFeedback('图片已保存');
       } else {
-        const id = newNoteId.current ?? (newNoteId.current = crypto.randomUUID());
-        await desktop.saveDrawingNote(id, png);
-        newNoteId.current = null;
-        setFeedback('已保存为图片便签');
+        if (!noteRequest.current || noteRequest.current.target !== target) noteRequest.current = { id: crypto.randomUUID(), target };
+        await desktop.saveDrawingNote(noteRequest.current.id, png, target);
+        noteRequest.current = null;
+        noteDialog.current?.close();
+        setFeedback(target ? '已插入所选便签' : '已新建图片便签');
       }
     } catch {
       setFeedback('保存失败，请重试。');
@@ -239,11 +282,10 @@ export default function DrawingBoardWindow() {
       </select></label>
       <label>粗细<input type="range" min={1} max={40} value={width} onChange={(event) => setWidth(Number(event.target.value))} /><output>{width} px</output></label>
       <label>颜色<input type="color" value={color} disabled={brush === 'eraser'} onChange={(event) => setColor(event.target.value)} /></label>
-      <button type="button" className="utility-button drawing-icon" aria-label="撤销一笔" title="撤销一笔" disabled={!strokeCount} onClick={() => {
-        strokes.current.pop();
-        setStrokeCount(strokes.current.length);
-        schedulePaint();
-      }}><Undo2 size={17} /></button>
+      <button type="button" className="utility-button drawing-icon" aria-label="撤销一笔" title="撤销一笔 (Ctrl+Z)" disabled={!strokeCount}
+        onClick={() => stepHistory(false)}><Undo2 size={17} /></button>
+      <button type="button" className="utility-button drawing-icon" aria-label="重做一笔" title="重做一笔 (Ctrl+Y)" disabled={!redoCount}
+        onClick={() => stepHistory(true)}><Redo2 size={17} /></button>
       <button type="button" className="utility-button drawing-icon" aria-label="清空画板" title="清空画板" disabled={!strokeCount}
         onClick={() => clearDialog.current?.showModal()}><Trash2 size={16} /></button>
       <button type="button" className="utility-button drawing-icon" aria-label="重置画布视图" title="重置画布位置和缩放" onClick={() => {
@@ -261,8 +303,21 @@ export default function DrawingBoardWindow() {
     <footer>
       <span role="status">{feedback || '关闭后清空画板'}</span>
       <button type="button" className="utility-button" disabled={!strokeCount || busy} onClick={() => void save('export')}><Download size={15} />保存图片</button>
-      <button type="button" className="utility-button is-primary" disabled={!strokeCount || busy} onClick={() => void save('note')}><StickyNote size={15} />保存为便签</button>
+      <button type="button" className="utility-button is-primary" disabled={!strokeCount || busy} onClick={() => void chooseNote()}><StickyNote size={15} />插入便签</button>
     </footer>
+    <dialog ref={noteDialog} className="drawing-clear-dialog drawing-note-dialog" aria-labelledby="drawing-note-title"
+      onClose={() => canvas.current?.focus({ preventScroll: true })}>
+      <h2 id="drawing-note-title">插入到便签</h2>
+      <label>目标便签<select value={targetNote} aria-label="目标便签" onChange={event => setTargetNote(event.target.value)}>
+        <option value="">新建便签</option>
+        {noteTargets.map(note => <option key={note.id} value={note.id}>{note.label}</option>)}
+      </select></label>
+      {feedback && <p role="status">{feedback}</p>}
+      <form method="dialog">
+        <button className="utility-button" disabled={busy}>取消</button>
+        <button type="button" className="utility-button is-primary" disabled={busy} onClick={() => void save('note', targetNote || undefined)}>插入图片</button>
+      </form>
+    </dialog>
     <dialog ref={clearDialog} className="drawing-clear-dialog" aria-labelledby="drawing-clear-title"
       onClose={() => canvas.current?.focus({ preventScroll: true })}>
       <h2 id="drawing-clear-title">清空画板？</h2>

@@ -147,6 +147,9 @@ select { font: inherit; }
 .note-window-body { padding: 7px; }
 .note-window-body .sticky-note { padding: 4px 6px; }
 .note-rich-editor { position: relative; flex: 1; min-width: 0; min-height: 72px; max-height: 420px; overflow: auto; outline: none; font-size: var(--note-font-size); line-height: 1.5; white-space: pre-wrap; overflow-wrap: anywhere; }
+.note-content { flex: 1; display: flex; flex-direction: column; gap: 6px; min-width: 0; }
+.note-images { display: flex; flex-direction: column; gap: 6px; max-height: 390px; overflow: auto; }
+.note-rich-editor ul { margin: 0; padding-inline-start: 1.45em; list-style: disc; }
 .note-rich-editor[data-empty='true']::before { content: '写点什么…'; position: absolute; inset: 0; opacity: .4; pointer-events: none; }
 .sticky-note.is-completed .note-rich-editor { text-decoration: line-through; opacity: .5; }
 .note-rich-editor [data-note-check] { display: inline-block; padding: 0 2px; cursor: pointer; user-select: none; }
@@ -155,6 +158,7 @@ select { font: inherit; }
 .note-format-actions, .note-format-colors { display: flex; flex-wrap: wrap; align-items: center; gap: 5px; }
 .note-format-bar button { display: inline-flex; align-items: center; justify-content: center; gap: 4px; min-height: 23px; padding: 0 5px; border: 1px solid transparent; border-radius: 4px; background: transparent; color: inherit; font-size: 10px; cursor: pointer; }
 .note-format-bar button:hover:not(:disabled) { border-color: currentColor; }
+.note-format-status { display: block; padding: 4px 5px 0; font-size: 11px; }
 .note-format-colors { padding: 4px 5px 1px; }
 .note-format-bar .note-format-swatch { width: 19px; min-height: 16px; border-color: rgba(255, 255, 255, .3); }
 .calendar-task.is-rollover-ghost { opacity: 0.6; }

@@ -22,7 +22,7 @@ function validRequestId(id) {
   return typeof id === 'string' && /^[a-f0-9-]{36}$/i.test(id);
 }
 
-function createUtilityWindows(iconPath, persistItem) {
+function createUtilityWindows(iconPath, persistItem, listNotes) {
   const windows = new Map();
 
   function open(view) {
@@ -96,11 +96,17 @@ function createUtilityWindows(iconPath, persistItem) {
     await fs.writeFile(filePath, content);
     return true;
   });
-  ipcMain.handle('drawing:note', async (event, id, bytes) => {
+  ipcMain.handle('drawing:notes', event => {
     verifySender(event, 'drawing');
-    if (!validRequestId(id)) throw new Error('无法创建画板便签');
+    return listNotes();
+  });
+  ipcMain.handle('drawing:note', async (event, id, bytes, targetNoteId) => {
+    verifySender(event, 'drawing');
+    if (!validRequestId(id) || (targetNoteId !== undefined && !listNotes().some(note => note.id === targetNoteId))) {
+      throw new Error('找不到要插入的便签');
+    }
     const image = 'data:image/png;base64,' + pngBuffer(bytes).toString('base64');
-    await persistItem({ kind: 'image-note', id, image });
+    await persistItem({ kind: 'image-note', id, image, targetNoteId });
   });
 
   return { open };
