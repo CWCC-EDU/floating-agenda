@@ -275,7 +275,9 @@ export function SettingsDialog({ initialCategory, localSkin, onLocalSkinChange, 
                 <Section title="视图">
                   <SelectRow title="当前视图" value={settings.calendarView} options={[{ value: 'day' as const, label: '日视图' }, { value: 'week' as const, label: '周视图' }, { value: 'month' as const, label: '月视图' }]} onChange={(calendarView) => update({ calendarView })} />
                   <ToggleRow title="显示左上角视图切换" description="关闭后仍可在这里选择当前视图" checked={settings.showCalendarViewSwitch} onChange={(showCalendarViewSwitch) => update({ showCalendarViewSwitch })} />
-                  <ToggleRow title="启用时间轴" description="月、周、日视图共用此设置" checked={settings.showTimeAxis} onChange={(showTimeAxis) => update({ showTimeAxis })} />
+                  <ToggleRow title="日视图时间轴" checked={settings.showDayTimeAxis} onChange={(showDayTimeAxis) => update({ showDayTimeAxis })} />
+                  <ToggleRow title="周视图时间轴" checked={settings.showWeekTimeAxis} onChange={(showWeekTimeAxis) => update({ showWeekTimeAxis })} />
+                  <ToggleRow title="月视图时间轴" checked={settings.showTimeAxis} onChange={(showTimeAxis) => update({ showTimeAxis })} />
                   <ColorRow title="当前时间线颜色" value={settings.currentTimeLineColor} onChange={(currentTimeLineColor) => update({ currentTimeLineColor })} />
                 </Section>
                 <Section title="月视图样式">

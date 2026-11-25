@@ -10,6 +10,15 @@ describe('state normalization', () => {
     expect(normalizeAppState({ settings: { currentTimeLineColor: 'red' } }).settings.currentTimeLineColor).toBe('#ff8d87');
   });
 
+  it('migrates a shared time-axis switch and preserves independent view settings', () => {
+    const defaults = normalizeAppState({ settings: {} }).settings;
+    expect(defaults).toMatchObject({ showTimeAxis: false, showWeekTimeAxis: false, showDayTimeAxis: false });
+    const legacy = normalizeAppState({ settings: { showTimeAxis: true } }).settings;
+    expect(legacy).toMatchObject({ showTimeAxis: true, showWeekTimeAxis: true, showDayTimeAxis: true });
+    const perView = normalizeAppState({ settings: { ...legacy, showTimeAxis: false, showDayTimeAxis: false } }).settings;
+    expect(perView).toMatchObject({ showTimeAxis: false, showWeekTimeAxis: true, showDayTimeAxis: false });
+  });
+
   it('inherits legacy task sizes and preserves independent day and week font limits', () => {
     const legacy = normalizeAppState({ settings: { taskBaseFontSize: 14, taskMinFontSize: 9 } }).settings;
     expect(legacy).toMatchObject({ dayTaskBaseFontSize: 14, dayTaskMinFontSize: 9, weekTaskBaseFontSize: 14, weekTaskMinFontSize: 9 });

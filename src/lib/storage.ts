@@ -45,6 +45,8 @@ export const DEFAULT_SETTINGS: Settings = {
   showCompletedIcon: false,
   showReminderTime: true,
   showTimeAxis: false,
+  showWeekTimeAxis: false,
+  showDayTimeAxis: false,
   taskTextBackground: 'none',
   taskAdaptiveColor: true,
   taskTextColor: '#eef6f4',
@@ -189,6 +191,9 @@ export function normalizeAppState(value: unknown): AppState {
   BOOLEAN_KEYS.forEach((key) => {
     if (typeof raw[key] === 'boolean') Object.assign(settings, { [key]: raw[key] });
   });
+
+  settings.showWeekTimeAxis = typeof raw.showWeekTimeAxis === 'boolean' ? raw.showWeekTimeAxis : settings.showTimeAxis;
+  settings.showDayTimeAxis = typeof raw.showDayTimeAxis === 'boolean' ? raw.showDayTimeAxis : settings.showTimeAxis;
 
   settings.rolloverWindow = numberInRange(raw.rolloverWindow, 1, 30, settings.rolloverWindow);
   settings.opacity = numberInRange(raw.opacity, 0, 100, settings.opacity);

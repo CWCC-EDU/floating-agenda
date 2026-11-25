@@ -108,6 +108,8 @@ export interface Settings {
   showCompletedIcon: boolean;
   showReminderTime: boolean;
   showTimeAxis: boolean;
+  showWeekTimeAxis: boolean;
+  showDayTimeAxis: boolean;
   taskTextBackground: TextBackground;
   taskAdaptiveColor: boolean;
   taskTextColor: string;

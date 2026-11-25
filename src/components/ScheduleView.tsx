@@ -107,7 +107,7 @@ export function ScheduleView({
   view, dates, today, selectedDate, settings,
   getDayTasks, getGhostTasks, renderTask, renderGhostTask, taskColor, onSelectDate, onOpenTask, onCreate,
 }: ScheduleViewProps) {
-  const timeline = settings.showTimeAxis;
+  const timeline = view === 'day' ? settings.showDayTimeAxis : settings.showWeekTimeAxis;
   const baseFontSize = view === 'day' ? settings.dayTaskBaseFontSize : settings.weekTaskBaseFontSize;
   const minFontSize = view === 'day' ? settings.dayTaskMinFontSize : settings.weekTaskMinFontSize;
   const preferredSize = (count: number) => taskFontSize(count, baseFontSize, minFontSize, settings.taskScrollThreshold);
