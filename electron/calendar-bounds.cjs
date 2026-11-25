@@ -1,5 +1,5 @@
-const MIN_CALENDAR_WIDTH = 760;
-const MIN_CALENDAR_HEIGHT = 520;
+const MIN_CALENDAR_WIDTH = 440;
+const MIN_CALENDAR_HEIGHT = 320;
 const DEFAULT_CALENDAR_WIDTH = 1180;
 const DEFAULT_CALENDAR_HEIGHT = 760;
 
@@ -28,4 +28,16 @@ function placeCalendar(bounds, area, center = false) {
   return { x, y, width, height };
 }
 
-module.exports = { MIN_CALENDAR_WIDTH, MIN_CALENDAR_HEIGHT, calendarIsReachable, placeCalendar };
+function resizeCalendar(bounds, edges, dx, dy, workArea) {
+  const west = edges.includes('w');
+  const north = edges.includes('n');
+  const horizontal = west || edges.includes('e');
+  const vertical = north || edges.includes('s');
+  const minWidth = Math.min(MIN_CALENDAR_WIDTH, workArea.width, bounds.width);
+  const minHeight = Math.min(MIN_CALENDAR_HEIGHT, workArea.height, bounds.height);
+  const width = horizontal ? Math.round(Math.max(minWidth, bounds.width + (west ? -dx : dx))) : bounds.width;
+  const height = vertical ? Math.round(Math.max(minHeight, bounds.height + (north ? -dy : dy))) : bounds.height;
+  return { x: west ? bounds.x + bounds.width - width : bounds.x, y: north ? bounds.y + bounds.height - height : bounds.y, width, height };
+}
+
+module.exports = { MIN_CALENDAR_WIDTH, MIN_CALENDAR_HEIGHT, calendarIsReachable, placeCalendar, resizeCalendar };

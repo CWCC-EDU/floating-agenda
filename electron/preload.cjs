@@ -2,6 +2,20 @@ const { contextBridge, ipcRenderer } = require('electron');
 
 contextBridge.exposeInMainWorld('desktop', {
   isElectron: true,
+  repairDesktopInput: () => ipcRenderer.invoke('desktop:repair-input'),
+  openQuickCapture: () => ipcRenderer.invoke('quick:open'),
+  closeQuickCapture: () => ipcRenderer.invoke('quick:close'),
+  submitQuickTask: (id, draft) => ipcRenderer.invoke('quick:submit', id, draft),
+  openDrawingBoard: () => ipcRenderer.invoke('drawing:open'),
+  exportDrawing: (bytes) => ipcRenderer.invoke('drawing:export', bytes),
+  saveDrawingNote: (id, bytes) => ipcRenderer.invoke('drawing:note', id, bytes),
+  onWorkspaceRequest: (callback) => {
+    const listener = (_event, request) => callback(request);
+    ipcRenderer.on('workspace:add', listener);
+    return () => ipcRenderer.removeListener('workspace:add', listener);
+  },
+  workspaceReady: () => ipcRenderer.send('workspace:ready'),
+  workspaceSaved: (requestId, saved) => ipcRenderer.send('workspace:saved', requestId, saved),
   loadState: () => ipcRenderer.invoke('state:load'),
   saveState: (state) => ipcRenderer.invoke('state:save', state),
   minimizeWindow: () => ipcRenderer.invoke('window:minimize'),

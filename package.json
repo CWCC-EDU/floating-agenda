@@ -1,6 +1,6 @@
 {
   "name": "floating-agenda",
-  "version": "1.4.4",
+  "version": "1.5.5",
   "private": true,
   "description": "A transparent desktop agenda with automatic task rollover.",
   "main": "electron/main.cjs",
@@ -11,7 +11,7 @@
     "build": "tsc --noEmit && vite build",
     "start": "electron .",
     "test": "vitest run",
-    "dist": "npm run build && electron-builder --win portable --x64"
+    "dist": "npm run build && electron-builder --win portable zip --x64"
   },
   "dependencies": {
     "lucide-react": "^0.468.0",
@@ -54,9 +54,22 @@
           "arch": [
             "x64"
           ]
+        },
+        {
+          "target": "zip",
+          "arch": [
+            "x64"
+          ]
         }
       ],
-      "artifactName": "Floating-Agenda-${version}-Windows-x64.${ext}"
+      "artifactName": "Floating-Agenda-${version}-Windows-x64.${ext}",
+      "electronLanguages": [
+        "zh-CN",
+        "en-US"
+      ]
+    },
+    "portable": {
+      "useZip": true
     }
   }
 }

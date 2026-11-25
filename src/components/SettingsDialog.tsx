@@ -6,7 +6,7 @@ import { SyncSettings } from './SyncSettings';
 import type { AppState, NutstoreRemoteSummary, NutstoreSyncResult, NutstoreSyncStatus, BulletStyle, CalendarDisplayStatus, CalendarLayout, DesktopIconLayer, EditorInputStyle, FontFamily, Settings, SkinPosition, SoundEffect, StickyNote, TextBackground, UpdateCheckResult } from '../types';
 
 type Category = 'calendar' | 'cells' | 'appearance' | 'notes' | 'sync' | 'advanced' | 'about';
-type ShortcutKey = 'showHideShortcut' | 'toggleContentShortcut' | 'toggleNotesShortcut' | 'completeTaskShortcut';
+type ShortcutKey = 'showHideShortcut' | 'quickCaptureShortcut' | 'toggleContentShortcut' | 'toggleNotesShortcut' | 'completeTaskShortcut';
 
 interface SettingsDialogProps {
   initialCategory: Category;
@@ -70,6 +70,7 @@ const FONT_OPTIONS: { value: FontFamily; label: string }[] = [
 const WEEKDAY_NAMES = ['星期日', '星期一', '星期二', '星期三', '星期四', '星期五', '星期六'];
 const SHORTCUT_DEFAULTS: Record<ShortcutKey, string> = {
   showHideShortcut: 'Control+Shift+Space',
+  quickCaptureShortcut: '',
   toggleContentShortcut: 'Control+Alt+F',
   toggleNotesShortcut: 'Control+Alt+B',
   completeTaskShortcut: 'Control+Alt+E',
@@ -208,18 +209,21 @@ function shortcutFromEvent(event: KeyboardEvent<HTMLInputElement>): string {
 }
 
 function ShortcutRow({ title, setting, value, disabled, onChange }: { title: string; setting: ShortcutKey; value: string; disabled?: boolean; onChange: (setting: ShortcutKey, value: string) => void }) {
+  const usesCustomShortcut = setting === 'quickCaptureShortcut';
   return (
     <div className="setting-row shortcut-setting-row">
       <div><strong>{title}</strong><p>点击快捷键框，再按下新的组合键</p></div>
-      <input className="shortcut-input" aria-label={`${title}快捷键`} value={value} placeholder="已关闭" readOnly={!value} disabled={disabled || !value} onKeyDown={(event) => {
+      <input className="shortcut-input" aria-label={`${title}快捷键`} value={value} placeholder={usesCustomShortcut ? '未设置' : '已关闭'} readOnly disabled={disabled || (!usesCustomShortcut && !value)} onKeyDown={(event) => {
         event.preventDefault();
-        if (event.key === 'Escape' || event.key === 'Backspace') onChange(setting, '');
+        if (event.key === 'Escape' || event.key === 'Backspace' || event.key === 'Delete') onChange(setting, '');
         else {
           const shortcut = shortcutFromEvent(event);
           if (shortcut) onChange(setting, shortcut);
         }
       }} />
-      <button className={`switch ${value ? 'is-on' : ''}`} type="button" role="switch" aria-checked={Boolean(value)} aria-label={`启用${title}`} disabled={disabled} onClick={() => onChange(setting, value ? '' : SHORTCUT_DEFAULTS[setting])}><span /></button>
+      {usesCustomShortcut
+        ? <button className="icon-button" type="button" aria-label="清除速记快捷键" disabled={disabled || !value} onClick={() => onChange(setting, '')}><X size={14} /></button>
+        : <button className={`switch ${value ? 'is-on' : ''}`} type="button" role="switch" aria-checked={Boolean(value)} aria-label={`启用${title}`} disabled={disabled} onClick={() => onChange(setting, value ? '' : SHORTCUT_DEFAULTS[setting])}><span /></button>}
     </div>
   );
 }
@@ -229,13 +233,15 @@ export function SettingsDialog({ initialCategory, localSkin, onLocalSkinChange, 
   const [updateResult, setUpdateResult] = useState<UpdateCheckResult | null>(null);
   const [skinError, setSkinError] = useState('');
   const [importingSkin, setImportingSkin] = useState(false);
+  const [repairing, setRepairing] = useState(false);
+  const [repairMessage, setRepairMessage] = useState('');
   const previewSkin = skinImage(settings.imageSkin, localSkin);
   const update = (patch: Partial<Settings>) => onChange({ ...settings, ...patch });
   const updateShortcut = (setting: ShortcutKey, value: string) => update({ [setting]: value });
   const numberOptions = (min: number, max: number, unit = '') => Array.from({ length: max - min + 1 }, (_, index) => ({ value: min + index, label: `${min + index}${unit}` }));
   const backgroundOptions: { value: TextBackground; label: string }[] = [{ value: 'none', label: '关闭' }, { value: 'soft', label: '柔和' }, { value: 'solid', label: '实色' }];
   const soundOptions: { value: SoundEffect; label: string }[] = [{ value: 'none', label: '无' }, { value: 'tick', label: '滴答' }, { value: 'chime', label: '小星星' }];
-  const closedBlankNotes = notes.filter((note) => !note.open && !note.text.trim());
+  const closedBlankNotes = notes.filter((note) => !note.open && !note.image && !note.text.trim());
   const title = CATEGORIES.find((item) => item.id === category)?.label ?? '日历设置';
 
   async function checkUpdates() {
@@ -266,15 +272,21 @@ export function SettingsDialog({ initialCategory, localSkin, onLocalSkinChange, 
             <header className="settings-page-header"><span className="eyebrow">PREFERENCES</span><h2 id="settings-title">{title}</h2></header>
             <div className="settings-content">
               {category === 'calendar' && <>
-                <Section title="自定义样式">
+                <Section title="视图">
+                  <SelectRow title="当前视图" value={settings.calendarView} options={[{ value: 'day' as const, label: '日视图' }, { value: 'week' as const, label: '周视图' }, { value: 'month' as const, label: '月视图' }]} onChange={(calendarView) => update({ calendarView })} />
+                  <ToggleRow title="显示左上角视图切换" description="关闭后仍可在这里选择当前视图" checked={settings.showCalendarViewSwitch} onChange={(showCalendarViewSwitch) => update({ showCalendarViewSwitch })} />
+                  <ToggleRow title="启用时间轴" description="月、周、日视图共用此设置" checked={settings.showTimeAxis} onChange={(showTimeAxis) => update({ showTimeAxis })} />
+                  <ColorRow title="当前时间线颜色" value={settings.currentTimeLineColor} onChange={(currentTimeLineColor) => update({ currentTimeLineColor })} />
+                </Section>
+                <Section title="月视图样式">
                   <ChoiceCards value={settings.layout} options={LAYOUTS} kind="layout" onChange={(layout) => update({ layout })} />
                   <SelectRow title="最大行数" description={settings.layout === 'full-month' ? '完整月份会自动补齐整月所需的 4–6 行' : undefined} value={settings.maxRows} options={numberOptions(1, 6)} disabled={settings.layout.includes('week') || settings.layout === 'full-month'} onChange={(maxRows) => update({ maxRows })} />
                   <SelectRow title="已过星期数" description="浮动月份保留今天之前的完整周数" value={settings.elapsedWeeks} options={numberOptions(0, 5)} disabled={settings.layout !== 'floating-month'} onChange={(elapsedWeeks) => update({ elapsedWeeks })} />
                   <SelectRow title="最大列数" description={settings.layout === 'full-month' ? '完整月份固定使用 7 列，显示完整周' : undefined} value={settings.maxColumns} options={numberOptions(1, 7)} disabled={settings.layout === 'full-month'} onChange={(maxColumns) => update({ maxColumns })} />
+                  <ToggleRow title="显示月间隔" checked={settings.showMonthSeparator} onChange={(showMonthSeparator) => update({ showMonthSeparator })} />
                 </Section>
                 <Section title="显示效果">
                   <ToggleRow title="毛玻璃特效" checked={settings.blurEnabled} onChange={(blurEnabled) => update({ blurEnabled })} />
-                  <ToggleRow title="显示月间隔" checked={settings.showMonthSeparator} onChange={(showMonthSeparator) => update({ showMonthSeparator })} />
                   <ToggleRow title="显示周数" checked={settings.showWeekNumbers} onChange={(showWeekNumbers) => update({ showWeekNumbers })} />
                   <ToggleRow title="显示阴影" checked={settings.showShadow} onChange={(showShadow) => update({ showShadow })} />
                   <ToggleRow title="显示标题栏" description="隐藏后仍可通过 Windows 托盘打开设置" checked={settings.showTitleBar} onChange={(showTitleBar) => update({ showTitleBar })} />
@@ -292,7 +304,7 @@ export function SettingsDialog({ initialCategory, localSkin, onLocalSkinChange, 
               </>}
 
               {category === 'cells' && <>
-                <Section title="自定义样式">
+                <Section title="月视图单元格样式">
                   <ChoiceCards value={settings.bulletStyle} options={BULLETS} kind="bullet" onChange={(bulletStyle) => update({ bulletStyle, autoNumber: bulletStyle === 'number' })} />
                   <SelectRow title="单元格间隙" value={settings.cellGap} options={numberOptions(0, 8)} onChange={(cellGap) => update({ cellGap })} />
                   <SelectRow title="行间距" value={settings.rowGap} options={numberOptions(0, 8)} onChange={(rowGap) => update({ rowGap })} />
@@ -302,8 +314,8 @@ export function SettingsDialog({ initialCategory, localSkin, onLocalSkinChange, 
                   <ToggleRow title="编辑完成自动排到末尾" checked={settings.completedToBottom} onChange={(completedToBottom) => update({ completedToBottom })} />
                   <ToggleRow title="显示已完成任务" checked={settings.showCompletedTasks} onChange={(showCompletedTasks) => update({ showCompletedTasks })} />
                   <ToggleRow title="显示已完成图标" checked={settings.showCompletedIcon} onChange={(showCompletedIcon) => update({ showCompletedIcon })} />
-                  <ToggleRow title="显示提醒时间" checked={settings.showReminderTime} onChange={(showReminderTime) => update({ showReminderTime })} />
-                  <ToggleRow title="启用日程提醒" description="到点时显示本机通知并播放提示音" checked={settings.remindersEnabled} onChange={(remindersEnabled) => update({ remindersEnabled })} />
+                  <ToggleRow title="显示日程时间段" checked={settings.showReminderTime} onChange={(showReminderTime) => update({ showReminderTime })} />
+                  <ToggleRow title="启用日程提醒" description="到达开始时间时显示本机通知并播放提示音" checked={settings.remindersEnabled} onChange={(remindersEnabled) => update({ remindersEnabled })} />
                   <ToggleRow title="未完成任务自动顺延" checked={settings.rolloverEnabled} onChange={(rolloverEnabled) => update({ rolloverEnabled })} />
                   <SelectRow title="自动顺延范围" value={settings.rolloverWindow} options={numberOptions(1, 30, ' 天')} disabled={!settings.rolloverEnabled} onChange={(rolloverWindow) => update({ rolloverWindow })} />
                   <ToggleRow title="顺延任务高亮" description="被顺延过的未完成任务使用指定颜色显示" checked={settings.rolloverHighlightEnabled} disabled={!settings.rolloverEnabled} onChange={(rolloverHighlightEnabled) => update({ rolloverHighlightEnabled })} />
@@ -312,9 +324,13 @@ export function SettingsDialog({ initialCategory, localSkin, onLocalSkinChange, 
                   <SelectRow title="显示文字背景" value={settings.taskTextBackground} options={backgroundOptions} onChange={(taskTextBackground) => update({ taskTextBackground })} />
                 </Section>
                 <Section title="任务密度与滚动">
-                  <SelectRow title="初始任务字号" value={settings.taskBaseFontSize} options={numberOptions(8, 20, 'px')} onChange={(taskBaseFontSize) => update({ taskBaseFontSize, taskMinFontSize: Math.min(settings.taskMinFontSize, taskBaseFontSize) })} />
-                  <SelectRow title="最小任务字号" value={settings.taskMinFontSize} options={numberOptions(6, settings.taskBaseFontSize, 'px')} onChange={(taskMinFontSize) => update({ taskMinFontSize })} />
-                  <SelectRow title="缩字条数上限" description="超过后不再缩小，日期格显示细滚动条" value={settings.taskScrollThreshold} options={numberOptions(2, 30, ' 条')} onChange={(taskScrollThreshold) => update({ taskScrollThreshold })} />
+                  <SelectRow title="月视图初始字号" value={settings.taskBaseFontSize} options={numberOptions(8, 20, 'px')} onChange={(taskBaseFontSize) => update({ taskBaseFontSize, taskMinFontSize: Math.min(settings.taskMinFontSize, taskBaseFontSize) })} />
+                  <SelectRow title="月视图最小字号" value={settings.taskMinFontSize} options={numberOptions(6, settings.taskBaseFontSize, 'px')} onChange={(taskMinFontSize) => update({ taskMinFontSize })} />
+                  <SelectRow title="周视图初始字号" value={settings.weekTaskBaseFontSize} options={numberOptions(8, 20, 'px')} onChange={(weekTaskBaseFontSize) => update({ weekTaskBaseFontSize, weekTaskMinFontSize: Math.min(settings.weekTaskMinFontSize, weekTaskBaseFontSize) })} />
+                  <SelectRow title="周视图最小字号" value={settings.weekTaskMinFontSize} options={numberOptions(6, settings.weekTaskBaseFontSize, 'px')} onChange={(weekTaskMinFontSize) => update({ weekTaskMinFontSize })} />
+                  <SelectRow title="日视图初始字号" value={settings.dayTaskBaseFontSize} options={numberOptions(8, 20, 'px')} onChange={(dayTaskBaseFontSize) => update({ dayTaskBaseFontSize, dayTaskMinFontSize: Math.min(settings.dayTaskMinFontSize, dayTaskBaseFontSize) })} />
+                  <SelectRow title="日视图最小字号" value={settings.dayTaskMinFontSize} options={numberOptions(6, settings.dayTaskBaseFontSize, 'px')} onChange={(dayTaskMinFontSize) => update({ dayTaskMinFontSize })} />
+                  <SelectRow title="缩字条数上限" description="月视图按条数缩字。日、周清单空间不足时可继续缩到最小字号。" value={settings.taskScrollThreshold} options={numberOptions(2, 30, ' 条')} onChange={(taskScrollThreshold) => update({ taskScrollThreshold })} />
                 </Section>
                 <Section title="提示音效">
                   <SelectRow title="编辑完成提示音" value={settings.editSaveSound} options={soundOptions} onChange={(editSaveSound) => update({ editSaveSound })} />
@@ -385,8 +401,8 @@ export function SettingsDialog({ initialCategory, localSkin, onLocalSkinChange, 
                   )}
                   {notes.map((note) => (
                     <div className="settings-note-entry" key={note.id}>
-                      <button className="settings-note-row" type="button" title={note.text || '空白便签'} onClick={() => onOpenNote(note.id)}>
-                        <span>{(note.text.trim().split('\n')[0] || '空白便签').slice(0, 40)}</span>
+                      <button className="settings-note-row" type="button" title={note.image ? '画板便签' : note.text || '空白便签'} onClick={() => onOpenNote(note.id)}>
+                        <span>{note.image ? '画板便签' : (note.text.trim().split('\n')[0] || '空白便签').slice(0, 40)}</span>
                         <em className={note.open ? 'is-open' : ''}>{note.open ? '已打开' : '已关闭'}</em>
                       </button>
                       <button className="settings-note-destroy" type="button" onClick={() => {
@@ -414,6 +430,17 @@ export function SettingsDialog({ initialCategory, localSkin, onLocalSkinChange, 
                 <Section title="高级设置">
                   <CalendarDisplaySetting />
                   <SelectRow title="桌面图标层级" description="日历在图标下方时，重叠的图标仍可点击。普通应用窗口始终优先显示。" value={settings.desktopIconLayer} options={DESKTOP_ICON_LAYERS} disabled={!isElectron} onChange={(desktopIconLayer) => update({ desktopIconLayer })} />
+                  {isElectron && <button type="button" className="settings-link-button" disabled={repairing} onClick={async () => {
+                    setRepairing(true);
+                    try {
+                      setRepairMessage(await window.desktop?.repairDesktopInput() ?? '暂时无法修复桌面输入。');
+                    } catch {
+                      setRepairMessage('暂时无法修复桌面输入。');
+                    } finally {
+                      setRepairing(false);
+                    }
+                  }}><span>修复桌面图标点击</span><ChevronRight size={16} /></button>}
+                  {repairMessage && <p className="update-result" role="status">{repairMessage}</p>}
                   <SelectRow title="开始星期" value={settings.weekStartsOn} options={WEEKDAY_NAMES.map((label, value) => ({ value, label }))} onChange={(weekStartsOn) => update({ weekStartsOn })} />
                   <SelectRow title="设置第一周" description="ISO 周或包含 1 月 1 日的第一周" value={settings.weekNumberMode} options={[{ value: 'iso' as const, label: 'ISO 标准周' }, { value: 'jan1' as const, label: '包含 1 月 1 日' }]} onChange={(weekNumberMode) => update({ weekNumberMode })} />
                 </Section>
@@ -422,6 +449,7 @@ export function SettingsDialog({ initialCategory, localSkin, onLocalSkinChange, 
                   <div className="rest-day-picker"><strong>选择休息日</strong><div>{WEEKDAY_NAMES.map((label, day) => <label key={label}><input type="checkbox" checked={settings.restDays.includes(day)} onChange={() => update({ restDays: settings.restDays.includes(day) ? settings.restDays.filter((item) => item !== day) : [...settings.restDays, day].sort() })} /><span>{label.replace('星期', '周')}</span></label>)}</div></div>
                 </Section>
                 <Section title="快捷键">
+                  <ShortcutRow title="快速记一条" setting="quickCaptureShortcut" value={settings.quickCaptureShortcut} disabled={!isElectron} onChange={updateShortcut} />
                   <ShortcutRow title="显示 / 隐藏日历" setting="showHideShortcut" value={settings.showHideShortcut} disabled={!isElectron} onChange={updateShortcut} />
                   <ShortcutRow title="显示 / 隐藏日历内容" setting="toggleContentShortcut" value={settings.toggleContentShortcut} disabled={!isElectron} onChange={updateShortcut} />
                   <ShortcutRow title="显示 / 隐藏便签" setting="toggleNotesShortcut" value={settings.toggleNotesShortcut} disabled={!isElectron} onChange={updateShortcut} />

@@ -1,6 +1,8 @@
 import { describe, expect, it } from 'vitest';
-import { addDays, addMonths, daysBetween, festivalLabel, getCalendarColumns, getCalendarDays, getWeekDays, getWeekNumber, lunarDateLabel, nextRepeatDate, solarTermLabel, toDateKey, yiJiLabel } from './date';
-import { extendRecurringTasks, removeTaskSeries, rolloverTasks, sortTasks } from './tasks';
+import { addDays, addMonths, adjacentCalendarPage, daysBetween, festivalLabel, getCalendarColumns, getCalendarDays, getWeekDays, getWeekNumber, lunarDateLabel, nextRepeatDate, solarTermLabel, toDateKey, yiJiLabel } from './date';
+import { extendRecurringTasks, removeTaskSeries, rolloverTasks, sortTasks, updateDayTasks } from './tasks';
+import { layoutScheduleEvents } from './schedule';
+import { isTaskTimeRange, timeAxisSegment } from './taskTime';
 import type { Task } from '../types';
 
 function task(overrides: Partial<Task> = {}): Task {
@@ -22,7 +24,81 @@ function task(overrides: Partial<Task> = {}): Task {
 
 const settings = { rolloverEnabled: true, rolloverWindow: 7 };
 
+it('projects time ranges onto the date axis without inventing durations or duplicating midnight', () => {
+  expect(isTaskTimeRange('09:00', '09:00')).toBe(false);
+  expect(timeAxisSegment('09:00', undefined)).toEqual({ from: 540, to: 540 });
+  expect(timeAxisSegment('23:30', '01:00')).toEqual({ from: 1410, to: 1440 });
+  expect(timeAxisSegment('23:30', '01:00', true)).toEqual({ from: 0, to: 60 });
+  expect(timeAxisSegment('23:30', '00:00', true)).toBeNull();
+});
+
+describe('custom recurrences and quick capture', () => {
+  it('counts the first entry and restores the original day after a short month', () => {
+    const original = task({
+      date: '2026-01-31', repeat: 'custom',
+      recurrence: { frequency: 'month', interval: 1, end: { type: 'count', count: 3 } },
+    });
+    const extended = extendRecurringTasks([original], original.date);
+    expect(extended.tasks.map(item => item.date)).toEqual(['2026-01-31', '2026-02-28', '2026-03-31']);
+    expect(extendRecurringTasks(extended.tasks, '2026-12-01').added).toBe(0);
+  });
+
+  it('uses selected weekdays on alternating weeks and includes the end date', () => {
+    const original = task({
+      date: '2026-11-09', repeat: 'custom',
+      recurrence: { frequency: 'week', interval: 2, weekdays: [1, 4], end: { type: 'until', date: '2026-11-26' } },
+    });
+    expect(extendRecurringTasks([original], original.date).tasks.map(item => item.date))
+      .toEqual(['2026-11-09', '2026-11-12', '2026-11-23', '2026-11-26']);
+  });
+
+  it('keeps an individually deleted occurrence deleted and preserves quick entries added during editing', () => {
+    const original = task({
+      repeat: 'custom', recurrence: { frequency: 'day', interval: 1, end: { type: 'count', count: 3 } },
+    });
+    const { tasks } = extendRecurringTasks([original], original.date);
+    const last = tasks[2];
+    const newTask = task({ id: 'quick', title: '速记', date: last.date });
+    const lead = updateDayTasks([...tasks, newTask], last.date, [], new Set([last.id]), original.date);
+    expect(lead.some(item => item.id === last.id)).toBe(false);
+    expect(lead).toContain(newTask);
+    expect(extendRecurringTasks(lead, original.date).added).toBe(0);
+  });
+
+  it('rebuilds future entries from an edited rule and preserves the prior occurrence', () => {
+    const original = task({
+      repeat: 'custom', recurrence: { frequency: 'day', interval: 1, end: { type: 'count', count: 4 } },
+    });
+    const { tasks } = extendRecurringTasks([original], original.date);
+    const chosen = tasks[1];
+    const revised = { ...chosen, recurrence: { frequency: 'day', interval: 3, end: { type: 'count', count: 2 } } } as Task;
+    const updated = updateDayTasks(tasks, chosen.date, [revised], new Set([chosen.id]), original.date);
+    expect(updated.map(item => item.date)).toEqual(['2026-11-10', '2026-11-11', '2026-11-14']);
+  });
+});
+
 describe('rolloverTasks', () => {
+  it('lets a task explicitly opt in or out independently of the global setting', () => {
+    const tasks = [task({ id: 'inherited' }), task({ id: 'enabled', rolloverMode: 'on' }), task({ id: 'disabled', rolloverMode: 'off' })];
+    expect(rolloverTasks(tasks, '2026-11-11', { ...settings, rolloverEnabled: false }).tasks.map(item => item.date))
+      .toEqual(['2026-11-10', '2026-11-11', '2026-11-10']);
+    expect(rolloverTasks(tasks, '2026-11-11', settings).tasks.map(item => item.date))
+      .toEqual(['2026-11-11', '2026-11-11', '2026-11-10']);
+  });
+
+  it('keeps a moved repeating occurrence linked and leaves the next occurrence on the global default', () => {
+    const original = task({
+      repeat: 'custom', rolloverMode: 'on',
+      recurrence: { frequency: 'day', interval: 2, end: { type: 'count', count: 3 } },
+    });
+    const rolled = rolloverTasks([original], '2026-11-11', settings).tasks;
+    const { tasks } = extendRecurringTasks(rolled, '2026-11-11');
+    expect(tasks.map(item => item.date)).toEqual(['2026-11-11', '2026-11-12', '2026-11-14']);
+    expect(tasks.map(item => item.rolloverMode)).toEqual(['on', undefined, undefined]);
+    const updated = updateDayTasks(tasks, original.date, [{ ...original, time: '' }], new Set([original.id]), '2026-11-11');
+    expect(updated.filter(item => item.id === original.id).map(item => item.date)).toEqual(['2026-11-11']);
+  });
+
   it('moves an unfinished overdue task to today', () => {
     const result = rolloverTasks([task()], '2026-11-11', settings);
     expect(result.moved).toBe(1);
@@ -144,6 +220,27 @@ describe('date utilities', () => {
     expect(getCalendarDays('2026-11-01', { weekStartsOn: 0 })[0]).toBe('2026-11-01');
   });
 
+  it('advances custom pages by the number of visible whole weeks across years and back', () => {
+    const options = { layout: 'floating-month', weekStartsOn: 0, maxRows: 2, maxColumns: 5 } as const;
+    const first = '2026-12-20';
+    const next = adjacentCalendarPage(first, options.maxRows, 1);
+    expect(next).toBe('2027-01-03');
+    const before = getCalendarDays('2026-12-01', { ...options, firstWeek: first });
+    const after = getCalendarDays('2027-01-01', { ...options, firstWeek: next });
+    expect(before).toHaveLength(10);
+    expect(after).toHaveLength(10);
+    expect(before[5]).toBe('2026-12-27');
+    expect(after[0]).toBe('2027-01-03');
+    expect(adjacentCalendarPage(next, options.maxRows, -1)).toBe(first);
+    expect(adjacentCalendarPage(first, 1, 1)).toBe('2026-12-27');
+    expect(adjacentCalendarPage(first, 4, 1)).toBe('2027-01-17');
+  });
+
+  it('keeps today in short floating layouts even when more past weeks are configured', () => {
+    const today = '2026-11-25';
+    expect(getCalendarDays(today, { layout: 'floating-month', today, maxRows: 1, elapsedWeeks: 5 })).toContain(today);
+  });
+
   it('handles month boundaries and calendar-day differences', () => {
     expect(addDays('2026-10-31', 1)).toBe('2026-11-01');
     expect(daysBetween('2026-10-31', '2026-11-01')).toBe(1);
@@ -196,10 +293,10 @@ describe('extendRecurringTasks', () => {
   });
 
   it('copies the latest occurrence and keeps the series idempotent', () => {
-    const seed = task({ date: '2026-11-11', repeat: 'weekly', title: '周报', time: '09:00', color: 'mint' });
+    const seed = task({ date: '2026-11-11', repeat: 'weekly', title: '周报', time: '09:00', endTime: '10:00', color: 'mint' });
     const once = extendRecurringTasks([seed], '2026-11-11');
     const next = once.tasks.find((item) => item.date === '2026-11-18');
-    expect(next).toMatchObject({ title: '周报', time: '09:00', color: 'mint', repeat: 'weekly', seriesId: 'task-1' });
+    expect(next).toMatchObject({ title: '周报', time: '09:00', endTime: '10:00', color: 'mint', repeat: 'weekly', seriesId: 'task-1' });
 
     const twice = extendRecurringTasks(once.tasks, '2026-11-11');
     expect(twice.added).toBe(0);
@@ -239,5 +336,30 @@ describe('sortTasks', () => {
     ];
     expect(sortTasks(tasks).map((item) => item.id)).toEqual(['all-day', 'later', 'done']);
     expect(sortTasks(tasks, false).map((item) => item.id)).toEqual(['all-day', 'done', 'later']);
+  });
+});
+
+describe('day and week time blocks', () => {
+  it('places overlaps beside each other and reuses the lane after their cluster ends', () => {
+    const events = layoutScheduleEvents([
+      task({ id: 'overlap', time: '09:30', endTime: '10:30' }),
+      task({ id: 'morning', time: '09:00', endTime: '10:00' }),
+      task({ id: 'after', time: '10:30', endTime: '11:00' }),
+      task({ id: 'all-day' }),
+    ], []);
+    expect(events.map(({ task, lane, lanes }) => [task.id, lane, lanes])).toEqual([
+      ['morning', 0, 2], ['overlap', 1, 2], ['after', 0, 1],
+    ]);
+  });
+
+  it('renders a single midnight continuation and a clickable legacy point within the grid', () => {
+    const overnight = task({ id: 'night', time: '23:30', endTime: '01:00' });
+    const point = task({ id: 'point', time: '23:59' });
+    const events = layoutScheduleEvents([point], [overnight, task({ time: '22:00' })]);
+    expect(events.map(({ task, from, to, continuing }) => [task.id, from, to, continuing])).toEqual([
+      ['night', 0, 60, true], ['point', 1439, 1439, false],
+    ]);
+    expect(events[1].end).toBe(1440);
+    expect(events[1].end).toBeGreaterThan(events[1].start);
   });
 });

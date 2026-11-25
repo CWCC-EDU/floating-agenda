@@ -204,7 +204,7 @@ export default function NoteWindow() {
       <aside ref={panelRef} className="notes-panel note-window-panel" style={style} aria-label="桌面便签">
         <header title="按住拖动便签" onPointerDown={startDrag} onPointerMove={moveDrag} onPointerUp={stopDrag} onPointerCancel={stopDrag} onLostPointerCapture={stopDrag}>
           <StickyNoteIcon size={15} />
-          <strong>便签</strong>
+          <strong>{note.image ? '画板便签' : '便签'}</strong>
           <button type="button" aria-label="新增便签" title="新增便签" onClick={() => desktop?.newNote()}><Plus size={15} /></button>
           <button type="button" aria-label="最小化便签" title="最小化便签（保留内容）" onClick={() => desktop?.closeNote(noteId)}><Minus size={15} /></button>
           <button type="button" aria-label="销毁便签" title="销毁便签" onClick={() => { if (window.confirm('永久销毁这张便签？')) desktop?.deleteNote(noteId); }}><X size={15} /></button>
@@ -212,7 +212,7 @@ export default function NoteWindow() {
         <div className="note-window-body">
           <div className={`sticky-note ${note.completed ? 'is-completed' : ''}`} data-background={appearance.noteTextBackground}>
             {appearance.showNoteCheckbox && <input type="checkbox" aria-label="完成便签" checked={note.completed} onChange={(event) => update({ completed: event.target.checked })} />}
-            <div
+            {note.image ? <img className="drawing-note-image" src={note.image} alt="画板便签" draggable={false} /> : <div
               ref={editorRef}
               className="note-rich-editor"
               contentEditable
@@ -233,10 +233,10 @@ export default function NoteWindow() {
                 document.execCommand('insertText', false, event.clipboardData.getData('text/plain'));
               }}
               onDrop={(event) => event.preventDefault()}
-            />
+            />}
           </div>
         </div>
-        <footer className="note-format-bar" aria-label="便签文字格式" onMouseDown={(event) => event.preventDefault()}>
+        {!note.image && <footer className="note-format-bar" aria-label="便签文字格式" onMouseDown={(event) => event.preventDefault()}>
           <div className="note-format-actions">
             <button type="button" disabled={!hasSelection} aria-expanded={showColors} title="选择文字后更改字体颜色" onClick={() => setShowColors((open) => !open)}><Palette size={13} />字体颜色</button>
             <button type="button" disabled={!hasCaret} title="切换光标所在行的删除线" onClick={() => { setShowColors(false); applyFormat({ type: 'strike' }); }}><Strikethrough size={13} />删除线</button>
@@ -249,7 +249,7 @@ export default function NoteWindow() {
               }} />
             ))}
           </div>}
-        </footer>
+        </footer>}
       </aside>
     </div>
   );

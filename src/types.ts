@@ -1,5 +1,25 @@
-export type RepeatRule = 'none' | 'daily' | 'weekly' | 'monthly' | 'yearly';
+export type RepeatRule = 'none' | 'daily' | 'weekly' | 'monthly' | 'yearly' | 'custom';
+export type RepeatFrequency = 'day' | 'week' | 'month' | 'year';
+export type TaskRolloverMode = 'on' | 'off';
+export type RepeatEnd = { type: 'never' } | { type: 'count'; count: number } | { type: 'until'; date: string };
+
+export interface RecurrencePattern {
+  frequency: RepeatFrequency;
+  interval: number;
+  weekdays?: number[];
+  end: RepeatEnd;
+}
+
+export interface QuickTaskDraft {
+  title: string;
+  date: string;
+  time: string;
+  endTime?: string;
+  repeat: RepeatRule;
+  recurrence?: RecurrencePattern;
+}
 export type TaskColor = 'default' | 'mint' | 'blue' | 'amber' | 'rose' | 'violet';
+export type CalendarView = 'month' | 'week' | 'day';
 export type CalendarLayout = 'floating-month' | 'full-month' | 'fixed-week' | 'floating-week';
 export type BulletStyle = 'none' | 'number' | 'dot';
 export type WeekNumberMode = 'iso' | 'jan1';
@@ -17,14 +37,21 @@ export interface Task {
   notes: string;
   date: string;
   time: string;
+  endTime?: string;
   completed: boolean;
   createdAt: string;
   completedAt?: string;
   originalDate: string;
   rolloverCount: number;
+  rolloverMode?: TaskRolloverMode;
   lastRolledFrom?: string;
   repeat: RepeatRule;
+  recurrence?: RecurrencePattern;
+  recurrenceStart?: string;
+  scheduledRepeatDate?: string;
+  recurrenceExcludedDates?: string[];
   color: TaskColor;
+  cardColor?: string;
   seriesId?: string;
 }
 
@@ -32,6 +59,7 @@ export interface StickyNote {
   id: string;
   text: string;
   richText?: string;
+  image?: string;
   completed: boolean;
   createdAt: string;
   open?: boolean;
@@ -51,6 +79,9 @@ export interface Settings {
   autoNumber: boolean;
   cellGap: number;
   todayColor: string;
+  calendarView: CalendarView;
+  showCalendarViewSwitch: boolean;
+  currentTimeLineColor: string;
   layout: CalendarLayout;
   maxRows: number;
   maxColumns: number;
@@ -76,11 +107,16 @@ export interface Settings {
   showCompletedCheckbox: boolean;
   showCompletedIcon: boolean;
   showReminderTime: boolean;
+  showTimeAxis: boolean;
   taskTextBackground: TextBackground;
   taskAdaptiveColor: boolean;
   taskTextColor: string;
   taskBaseFontSize: number;
   taskMinFontSize: number;
+  dayTaskBaseFontSize: number;
+  dayTaskMinFontSize: number;
+  weekTaskBaseFontSize: number;
+  weekTaskMinFontSize: number;
   taskScrollThreshold: number;
   editSaveSound: SoundEffect;
   reminderSound: SoundEffect;
@@ -109,6 +145,7 @@ export interface Settings {
   noteTextBackground: TextBackground;
   showNoteCheckbox: boolean;
   showHideShortcut: string;
+  quickCaptureShortcut: string;
   toggleContentShortcut: string;
   toggleNotesShortcut: string;
   completeTaskShortcut: string;
@@ -124,6 +161,14 @@ export interface AppState {
   tasks: Task[];
   notes: StickyNote[];
   settings: Settings;
+}
+
+export type WorkspaceItem = { kind: 'task'; id: string; draft: QuickTaskDraft }
+  | { kind: 'image-note'; id: string; image: string };
+
+export interface WorkspaceRequest {
+  requestId: string;
+  item: WorkspaceItem;
 }
 
 export interface NutstoreSyncStatus {
@@ -220,6 +265,16 @@ export interface UpdateCheckResult {
 
 export interface DesktopBridge {
   isElectron: true;
+  repairDesktopInput: () => Promise<string>;
+  openQuickCapture: () => Promise<void>;
+  closeQuickCapture: () => Promise<void>;
+  submitQuickTask: (id: string, draft: QuickTaskDraft) => Promise<void>;
+  openDrawingBoard: () => Promise<void>;
+  exportDrawing: (bytes: Uint8Array) => Promise<boolean>;
+  saveDrawingNote: (id: string, bytes: Uint8Array) => Promise<void>;
+  onWorkspaceRequest: (callback: (request: WorkspaceRequest) => void) => () => void;
+  workspaceReady: () => void;
+  workspaceSaved: (requestId: string, saved: boolean) => void;
   loadState: () => Promise<unknown>;
   saveState: (state: AppState) => Promise<void>;
   minimizeWindow: () => Promise<void>;

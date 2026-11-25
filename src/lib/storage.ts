@@ -1,4 +1,6 @@
 import type { AppState, Settings, StickyNote, Task, TaskColor } from '../types';
+import { DEFAULT_RECURRENCE, isDateKey, normalizeRecurrence, REPEAT_OPTIONS } from './recurrence';
+import { isClockTime, isTaskTimeRange } from './taskTime';
 
 const STORAGE_KEY = 'floating-agenda-state-v1';
 const TASK_COLORS: TaskColor[] = ['default', 'mint', 'blue', 'amber', 'rose', 'violet'];
@@ -14,6 +16,9 @@ export const DEFAULT_SETTINGS: Settings = {
   autoNumber: true,
   cellGap: 0,
   todayColor: '#d7e9a7',
+  calendarView: 'month',
+  showCalendarViewSwitch: true,
+  currentTimeLineColor: '#ff8d87',
   layout: 'full-month',
   maxRows: 6,
   maxColumns: 7,
@@ -39,11 +44,16 @@ export const DEFAULT_SETTINGS: Settings = {
   showCompletedCheckbox: false,
   showCompletedIcon: false,
   showReminderTime: true,
+  showTimeAxis: false,
   taskTextBackground: 'none',
   taskAdaptiveColor: true,
   taskTextColor: '#eef6f4',
   taskBaseFontSize: 10,
   taskMinFontSize: 7,
+  dayTaskBaseFontSize: 10,
+  dayTaskMinFontSize: 7,
+  weekTaskBaseFontSize: 10,
+  weekTaskMinFontSize: 7,
   taskScrollThreshold: 6,
   editSaveSound: 'none',
   reminderSound: 'chime',
@@ -76,6 +86,7 @@ export const DEFAULT_SETTINGS: Settings = {
   noteTextBackground: 'soft',
   showNoteCheckbox: false,
   showHideShortcut: 'Control+Shift+Space',
+  quickCaptureShortcut: '',
   toggleContentShortcut: '',
   toggleNotesShortcut: '',
   completeTaskShortcut: '',
@@ -91,7 +102,7 @@ const BOOLEAN_KEYS = [
   'rolloverEnabled', 'rolloverHighlightEnabled', 'rolloverGhostEnabled', 'showWeekNumbers', 'showLunar', 'showTitleBar', 'blurEnabled',
   'showMonthSeparator', 'showShadow', 'showLegalHolidays', 'showImportantFestivals',
   'showSolarTerms', 'showYiJi', 'completedToBottom', 'showCompletedTasks',
-  'showCompletedCheckbox', 'showCompletedIcon', 'showReminderTime', 'taskAdaptiveColor',
+  'showCompletedCheckbox', 'showCompletedIcon', 'showReminderTime', 'showTimeAxis', 'showCalendarViewSwitch', 'taskAdaptiveColor',
   'remindersEnabled', 'showRestDays', 'showNotes', 'showNoteCheckbox', 'autoStartEnabled',
   'autoCheckUpdates', 'proxyEnabled',
 ] as const;
@@ -116,30 +127,44 @@ function textValue(value: unknown, fallback: string, maxLength: number): string 
 
 function normalizeTask(value: Partial<Task>): Task | null {
   if (!value.id || !value.title || !value.date) return null;
+  const cardColor = colorValue(value.cardColor, '');
   return {
     id: value.id,
     title: value.title,
     notes: value.notes ?? '',
     date: value.date,
-    time: value.time ?? '',
+    time: isClockTime(value.time) ? value.time : '',
+    ...(value.time && value.endTime && isTaskTimeRange(value.time, value.endTime) ? { endTime: value.endTime } : {}),
     completed: Boolean(value.completed),
     createdAt: value.createdAt ?? new Date().toISOString(),
     completedAt: value.completedAt,
     originalDate: value.originalDate ?? value.date,
     rolloverCount: value.rolloverCount ?? 0,
+    ...(value.rolloverMode === 'on' || value.rolloverMode === 'off' ? { rolloverMode: value.rolloverMode } : {}),
     lastRolledFrom: value.lastRolledFrom,
-    repeat: value.repeat ?? 'none',
+    repeat: REPEAT_OPTIONS.some(option => option.value === value.repeat) ? value.repeat! : 'none',
+    ...(isDateKey(value.scheduledRepeatDate) ? { scheduledRepeatDate: value.scheduledRepeatDate } : {}),
+    ...(value.repeat === 'custom' ? {
+      recurrence: normalizeRecurrence(value.recurrence) ?? DEFAULT_RECURRENCE,
+      recurrenceStart: isDateKey(value.recurrenceStart) ? value.recurrenceStart : undefined,
+      recurrenceExcludedDates: Array.isArray(value.recurrenceExcludedDates)
+        ? value.recurrenceExcludedDates.filter(isDateKey) : undefined,
+    } : {}),
     color: value.color && TASK_COLORS.includes(value.color) ? value.color : 'default',
+    ...(cardColor ? { cardColor } : {}),
     seriesId: value.seriesId,
   };
 }
 
 function normalizeNote(value: Partial<StickyNote>): StickyNote | null {
   if (!value.id || typeof value.text !== 'string') return null;
+  const image = typeof value.image === 'string' && value.image.length <= 7_000_000
+    && /^data:image\/png;base64,[A-Za-z0-9+/]+={0,2}$/.test(value.image) ? value.image : undefined;
   return {
     id: value.id,
     text: value.text,
     ...(typeof value.richText === 'string' ? { richText: value.richText } : {}),
+    ...(image ? { image } : {}),
     completed: Boolean(value.completed),
     createdAt: value.createdAt ?? new Date().toISOString(),
     open: value.open === true,
@@ -175,6 +200,10 @@ export function normalizeAppState(value: unknown): AppState {
   settings.rowGap = numberInRange(raw.rowGap, 0, 8, settings.rowGap);
   settings.taskBaseFontSize = numberInRange(raw.taskBaseFontSize, 8, 20, settings.taskBaseFontSize);
   settings.taskMinFontSize = numberInRange(raw.taskMinFontSize, 6, settings.taskBaseFontSize, settings.taskMinFontSize);
+  settings.dayTaskBaseFontSize = numberInRange(raw.dayTaskBaseFontSize, 8, 20, settings.taskBaseFontSize);
+  settings.dayTaskMinFontSize = numberInRange(raw.dayTaskMinFontSize, 6, settings.dayTaskBaseFontSize, Math.min(settings.taskMinFontSize, settings.dayTaskBaseFontSize));
+  settings.weekTaskBaseFontSize = numberInRange(raw.weekTaskBaseFontSize, 8, 20, settings.taskBaseFontSize);
+  settings.weekTaskMinFontSize = numberInRange(raw.weekTaskMinFontSize, 6, settings.weekTaskBaseFontSize, Math.min(settings.taskMinFontSize, settings.weekTaskBaseFontSize));
   settings.taskScrollThreshold = numberInRange(raw.taskScrollThreshold, 2, 30, settings.taskScrollThreshold);
   settings.calendarFontSize = numberInRange(raw.calendarFontSize, 9, 22, settings.calendarFontSize);
   settings.editorFontSize = numberInRange(raw.editorFontSize, 9, 22, settings.editorFontSize);
@@ -182,6 +211,7 @@ export function normalizeAppState(value: unknown): AppState {
   settings.noteRowGap = numberInRange(raw.noteRowGap, 0, 8, settings.noteRowGap);
   settings.noteFontSize = numberInRange(raw.noteFontSize, 9, 22, settings.noteFontSize);
 
+  settings.calendarView = enumValue(raw.calendarView, ['month', 'week', 'day'] as const, settings.calendarView);
   settings.layout = enumValue(raw.layout, ['floating-month', 'full-month', 'fixed-week', 'floating-week'] as const, settings.layout);
   settings.weekNumberMode = enumValue(raw.weekNumberMode, ['iso', 'jan1'] as const, settings.weekNumberMode);
   settings.taskTextBackground = enumValue(raw.taskTextBackground, ['none', 'soft', 'solid'] as const, settings.taskTextBackground);
@@ -212,6 +242,7 @@ export function normalizeAppState(value: unknown): AppState {
 
   settings.backgroundColor = colorValue(raw.backgroundColor, settings.backgroundColor);
   settings.todayColor = colorValue(raw.todayColor, settings.todayColor);
+  settings.currentTimeLineColor = colorValue(raw.currentTimeLineColor, settings.currentTimeLineColor);
   settings.taskTextColor = colorValue(raw.taskTextColor, settings.taskTextColor);
   settings.calendarTextColor = colorValue(raw.calendarTextColor, settings.calendarTextColor);
   settings.editorTextColor = colorValue(raw.editorTextColor, settings.editorTextColor);
@@ -226,6 +257,7 @@ export function normalizeAppState(value: unknown): AppState {
     settings.restDays = [...new Set(raw.restDays.filter((day): day is number => typeof day === 'number' && Number.isInteger(day) && day >= 0 && day <= 6))];
   }
   settings.showHideShortcut = textValue(raw.showHideShortcut, settings.showHideShortcut, 80).trim();
+  settings.quickCaptureShortcut = textValue(raw.quickCaptureShortcut, settings.quickCaptureShortcut, 80).trim();
   settings.toggleContentShortcut = textValue(raw.toggleContentShortcut, settings.toggleContentShortcut, 80).trim();
   settings.toggleNotesShortcut = textValue(raw.toggleNotesShortcut, settings.toggleNotesShortcut, 80).trim();
   settings.completeTaskShortcut = textValue(raw.completeTaskShortcut, settings.completeTaskShortcut, 80).trim();

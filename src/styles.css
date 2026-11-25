@@ -166,6 +166,8 @@ button:disabled { cursor: not-allowed; opacity: 0.35; }
   top: 34px;
   right: 4px;
   width: 224px;
+  max-height: calc(100% - 38px);
+  overflow-y: auto;
   padding: 5px;
   border: 1px solid rgba(255, 255, 255, 0.72);
   border-radius: 7px;
@@ -201,8 +203,10 @@ button:disabled { cursor: not-allowed; opacity: 0.35; }
 .window-menu-separator { height: 1px; margin: 5px 7px; background: #e1e8e9; }
 
 .calendar-shell.is-adjusting {
-  border-style: dashed;
-  border-color: rgba(213, 244, 229, 0.8);
+  border-radius: 0;
+  border: 0;
+  outline: 1px dashed rgba(213, 244, 229, 0.8);
+  outline-offset: -1px;
 }
 
 .is-adjusting .calendar-topbar { cursor: move; }
@@ -882,6 +886,11 @@ button:disabled { cursor: not-allowed; opacity: 0.35; }
 .editor-textarea[data-empty='true']::before { content: attr(data-placeholder); position: absolute; left: 0; top: 0; color: rgba(215, 230, 220, 0.23); pointer-events: none; }
 .editor-selected-meta { display: flex; flex: 0 0 auto; align-items: center; gap: 9px; margin: 0 20px; padding: 10px 2px; border-top: 1px solid rgba(255, 255, 255, 0.055); color: rgba(216, 230, 221, 0.38); font-size: 9px; }
 .editor-selected-meta input { width: 82px; height: 26px; padding: 0 5px; border: 1px solid rgba(255, 255, 255, 0.07); border-radius: 6px; color: rgba(229, 239, 232, 0.65); background: rgba(255, 255, 255, 0.035); font-size: 9px; }
+.editor-selected-meta { flex-wrap: wrap; }
+.editor-selected-meta label { display: inline-flex; align-items: center; gap: 4px; }
+.editor-time-message { color: #edc798; }
+.editor-clear-reminder { height: 26px; padding: 0 7px; border: 1px solid rgba(255, 255, 255, 0.1); border-radius: 6px; color: rgba(229, 239, 232, 0.74); background: transparent; cursor: pointer; }
+.editor-clear-reminder:not(:disabled):hover { color: #d5ebe1; background: rgba(255, 255, 255, 0.06); }
 .editor-line-count { margin-left: auto; color: rgba(216, 230, 221, 0.25); }
 .editor-toolbar { position: relative; display: flex; flex: 0 0 55px; align-items: center; gap: 4px; padding: 0 15px; border-top: 1px solid rgba(255, 255, 255, 0.065); background: rgba(5, 13, 17, 0.12); border-radius: 0 0 15px 15px; }
 .editor-toolbar > button,
@@ -903,10 +912,23 @@ button:disabled { cursor: not-allowed; opacity: 0.35; }
 .repeat-popover button { display: flex; width: 100%; height: 30px; align-items: center; justify-content: space-between; padding: 0 9px; border: 0; border-radius: 6px; color: rgba(229, 239, 232, 0.65); background: transparent; font-size: 10px; cursor: pointer; }
 .repeat-popover button:hover,
 .repeat-popover button.is-active { color: #c6e8d2; background: rgba(255, 255, 255, 0.06); }
-.color-popover { display: flex; gap: 3px; }
+.color-popover { display: grid; gap: 4px; width: max-content; }
+.editor-color-presets { display: flex; gap: 3px; }
+.editor-custom-color {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 4px;
+  border-top: 1px solid rgba(255, 255, 255, 0.12);
+  color: #dce9e3;
+  font-size: 11px;
+}
+.editor-custom-color input { width: 33px; height: 24px; padding: 0; border: 0; background: transparent; cursor: pointer; }
 .color-popover button { display: grid; width: 28px; height: 28px; padding: 0; place-items: center; border: 1px solid transparent; border-radius: 7px; background: transparent; cursor: pointer; }
 .color-popover button:hover,
 .color-popover button.is-active { border-color: rgba(255, 255, 255, 0.15); background: rgba(255, 255, 255, 0.06); }
+.color-popover .editor-reset-color { width: auto; height: 24px; padding: 0 4px; font-size: 11px; }
 .color-popover button span { width: 13px; height: 13px; border-radius: 50%; box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.15); }
 
 .task-form { display: flex; flex-direction: column; gap: 12px; padding: 4px 20px 9px; }
@@ -1081,6 +1103,19 @@ button:disabled { cursor: not-allowed; opacity: 0.35; }
   .month-summary { display: none; }
   .brand div span { display: none; }
   .brand strong { font-size: 12px; }
+}
+
+@media (max-width: 520px) {
+  .day-editor-backdrop { padding-inline: 12px; }
+  .editor-toolbar { padding-inline: 8px; }
+  .editor-toolbar .editor-hint { display: none; }
+}
+
+@media (max-height: 420px) {
+  .day-editor-backdrop { padding-block: 10px; }
+  .day-editor-header { padding-block: 8px; }
+  .editor-textbox { min-height: 72px; }
+  .editor-toolbar { flex-basis: 42px; }
 }
 
 @media (max-height: 620px) {

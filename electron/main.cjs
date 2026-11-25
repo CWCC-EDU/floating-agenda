@@ -1,10 +1,12 @@
 const { app, BrowserWindow, dialog, globalShortcut, ipcMain, Menu, nativeImage, net, Notification, screen, session, Tray } = require('electron');
 const { maintainDesktopOrder, moveNoteWindow, repairDesktopInput, stopDesktopOrder } = require('./desktop-order.cjs');
-const { MIN_CALENDAR_WIDTH, MIN_CALENDAR_HEIGHT, calendarIsReachable, placeCalendar } = require('./calendar-bounds.cjs');
+const { MIN_CALENDAR_WIDTH, MIN_CALENDAR_HEIGHT, calendarIsReachable, placeCalendar, resizeCalendar } = require('./calendar-bounds.cjs');
 const fs = require('node:fs/promises');
 const fsSync = require('node:fs');
 const path = require('node:path');
+const { randomUUID } = require('node:crypto');
 const nutstore = require('./nutstore.cjs');
+const { createUtilityWindows } = require('./utility-windows.cjs');
 
 let mainWindow = null;
 let tray = null;
@@ -21,6 +23,7 @@ let latestSettings = {
   proxyEnabled: false,
   proxyServer: '',
   showHideShortcut: 'Control+Shift+Space',
+  quickCaptureShortcut: '',
   toggleContentShortcut: '',
   toggleNotesShortcut: '',
   completeTaskShortcut: '',
@@ -42,6 +45,8 @@ const closingNoteIds = new Set();
 let noteBoundsCache = null;
 let noteDrag = null;
 let notesSuppressed = false;
+let workspaceReady = false;
+const workspaceRequests = new Map();
 
 const NOTES_WIDTH = 296;
 const NOTES_MIN_HEIGHT = 120;
@@ -50,6 +55,31 @@ const statePath = () => path.join(app.getPath('userData'), 'floating-agenda.json
 const windowBoundsPath = () => path.join(app.getPath('userData'), 'window-bounds.json');
 const notesBoundsPath = () => path.join(app.getPath('userData'), 'notes-bounds.json');
 const iconPath = () => path.join(__dirname, '..', 'build', 'icon.png');
+const utilityWindows = createUtilityWindows(iconPath, persistWorkspaceItem);
+
+function deliverWorkspaceRequests() {
+  if (!workspaceReady || !mainWindow || mainWindow.isDestroyed()) return;
+  workspaceRequests.forEach(({ item }, requestId) => {
+    mainWindow.webContents.send('workspace:add', { requestId, item });
+  });
+}
+
+function persistWorkspaceItem(item) {
+  return new Promise((resolve, reject) => {
+    const requestId = randomUUID();
+    const timeout = setTimeout(() => finish(false), 12_000);
+    function finish(saved) {
+      clearTimeout(timeout);
+      workspaceRequests.delete(requestId);
+      if (saved) resolve();
+      else reject(new Error('保存失败，请稍后重试'));
+    }
+    workspaceRequests.set(requestId, { item, finish });
+    if (workspaceReady && mainWindow && !mainWindow.isDestroyed()) {
+      mainWindow.webContents.send('workspace:add', { requestId, item });
+    }
+  });
+}
 
 function loadWindowBounds() {
   try {
@@ -185,7 +215,6 @@ function showCalendarOnCurrentDisplay() {
 function minimizeWindow() {
   adjustment = null;
   calendarRequested = false;
-  mainWindow?.setResizable(false);
   mainWindow?.hide();
   notesSuppressed = true;
   noteToFocus = null;
@@ -547,6 +576,7 @@ function registerShortcuts() {
   globalShortcut.unregisterAll();
   const shortcuts = [
     [latestSettings.showHideShortcut, toggleWindow],
+    [latestSettings.quickCaptureShortcut, () => utilityWindows.open('quick')],
     [latestSettings.toggleContentShortcut, () => sendMenuAction('toggle-content')],
     [latestSettings.toggleNotesShortcut, () => sendMenuAction('toggle-notes')],
     [latestSettings.completeTaskShortcut, () => sendMenuAction('complete-selected')],
@@ -569,6 +599,7 @@ async function applyIntegrationSettings() {
     latestSettings.proxyEnabled,
     latestSettings.proxyServer,
     latestSettings.showHideShortcut,
+    latestSettings.quickCaptureShortcut,
     latestSettings.toggleContentShortcut,
     latestSettings.toggleNotesShortcut,
     latestSettings.completeTaskShortcut,
@@ -625,7 +656,7 @@ async function checkForUpdatesInBackground() {
   }
 }
 
-async function repairDesktopFromTray() {
+async function repairDesktopFromSettings() {
   const status = await repairDesktopInput();
   const messages = {
     enabled: 'Windows 桌面当前已启用鼠标输入。',
@@ -633,11 +664,7 @@ async function repairDesktopFromTray() {
     busy: '桌面有一个系统弹窗。请先关闭它，再尝试修复。',
     unavailable: '暂时无法修复桌面输入。',
   };
-  await dialog.showMessageBox({
-    type: status === 'busy' || status === 'unavailable' ? 'warning' : 'info',
-    title: '桌面图标点击',
-    message: messages[status] ?? messages.unavailable,
-  });
+  return messages[status] ?? messages.unavailable;
 }
 
 function updateTrayMenu() {
@@ -646,10 +673,11 @@ function updateTrayMenu() {
     { label: '显示 / 隐藏日历', click: toggleWindow },
     { label: '将日历移到当前屏幕', click: showCalendarOnCurrentDisplay },
     { label: '新建日程', accelerator: 'Control+N', click: () => sendMenuAction('new-task') },
+    { label: '快速记一条', click: () => utilityWindows.open('quick') },
     { label: '新建便签', click: () => postMenuAction('note:new') },
     { type: 'separator' },
-    { label: '上一月', click: () => sendMenuAction('previous-month') },
-    { label: '下一月', click: () => sendMenuAction('next-month') },
+    { label: '上一页', click: () => sendMenuAction('previous-month') },
+    { label: '下一页', click: () => sendMenuAction('next-month') },
     { label: '回到今天', click: () => sendMenuAction('today') },
     {
       label: '显示日程',
@@ -667,7 +695,6 @@ function updateTrayMenu() {
     { label: '跟随 Windows 启动', type: 'checkbox', checked: latestSettings.autoStartEnabled, click: () => sendMenuAction('toggle:autoStartEnabled') },
     { label: '背景、透明度与更多设置…', click: () => sendMenuAction('open-settings') },
     { type: 'separator' },
-    { label: '修复桌面图标点击', visible: process.platform === 'win32', click: () => void repairDesktopFromTray() },
     { label: '退出浮屿', click: quitApp },
   ]);
   tray.setContextMenu(menu);
@@ -709,6 +736,7 @@ function createWindow() {
       sandbox: true,
     },
   });
+  mainWindow.webContents.on('did-start-loading', () => { workspaceReady = false; });
 
   if (process.env.VITE_DEV_SERVER_URL) {
     mainWindow.loadURL(process.env.VITE_DEV_SERVER_URL);
@@ -735,6 +763,7 @@ function createWindow() {
   mainWindow.on('closed', () => {
     adjustment = null;
     calendarRequested = false;
+    workspaceReady = false;
     mainWindow = null;
     if (!isQuitting) setTimeout(createWindow, 800);
   });
@@ -854,6 +883,20 @@ function persistState(state) {
 }
 
 ipcMain.handle('window:minimize', minimizeWindow);
+ipcMain.handle('quick:open', event => {
+  if (event.sender === mainWindow?.webContents) utilityWindows.open('quick');
+});
+ipcMain.handle('drawing:open', event => {
+  if (event.sender === mainWindow?.webContents) utilityWindows.open('drawing');
+});
+ipcMain.on('workspace:ready', event => {
+  if (event.sender !== mainWindow?.webContents) return;
+  workspaceReady = true;
+  deliverWorkspaceRequests();
+});
+ipcMain.on('workspace:saved', (event, requestId, saved) => {
+  if (event.sender === mainWindow?.webContents) workspaceRequests.get(requestId)?.finish(saved === true);
+});
 
 ipcMain.on('notes:sync', (_event, payload) => {
   if (!payload || typeof payload !== 'object') return;
@@ -879,7 +922,7 @@ ipcMain.on('note:change', (event, message) => {
   if (!note || noteWindows.get(id)?.webContents !== event.sender) return;
   const patch = message.patch && typeof message.patch === 'object' ? message.patch : {};
   const next = { ...note };
-  if (typeof patch.text === 'string') {
+  if (!note.image && typeof patch.text === 'string') {
     next.text = patch.text;
     next.richText = typeof patch.richText === 'string' ? patch.richText : undefined;
   }
@@ -960,16 +1003,19 @@ ipcMain.handle('calendar:set-display', async (event, preference) => {
   return calendarDisplayStatus();
 });
 
-ipcMain.handle('window:adjust-mode', (_event, enabled) => {
+ipcMain.handle('window:adjust-mode', () => {
   if (!mainWindow || mainWindow.isDestroyed()) return;
   adjustment = null;
-  mainWindow.setResizable(enabled === true);
   updateDesktopOrder();
+});
+
+ipcMain.handle('desktop:repair-input', (event) => {
+  if (event.sender === mainWindow?.webContents && process.platform === 'win32') return repairDesktopFromSettings();
+  return '暂时无法修复桌面输入。';
 });
 
 ipcMain.handle('window:adjust-start', (_event, mode, resizeEdges) => {
   if (!mainWindow || mainWindow.isDestroyed() || (mode !== 'move' && mode !== 'resize')) return;
-  mainWindow.setResizable(true);
   const cursor = screen.getCursorScreenPoint();
   adjustment = {
     mode,
@@ -1002,15 +1048,12 @@ ipcMain.handle('window:adjust-update', () => {
       mainWindow.setBounds({ x, y, width: bounds.width, height: bounds.height }, false);
     }
   } else {
-    const [minWidth, minHeight] = mainWindow.getMinimumSize();
     const { bounds, resizeEdges } = adjustment;
-    const width = Math.round(Math.max(minWidth, bounds.width + (resizeEdges.includes('e') ? dx : resizeEdges.includes('w') ? -dx : 0)));
-    const height = Math.round(Math.max(minHeight, bounds.height + (resizeEdges.includes('s') ? dy : resizeEdges.includes('n') ? -dy : 0)));
-    const x = Math.round(resizeEdges.includes('w') ? bounds.x + bounds.width - width : bounds.x);
-    const y = Math.round(resizeEdges.includes('n') ? bounds.y + bounds.height - height : bounds.y);
+    const next = resizeCalendar(bounds, resizeEdges, dx, dy, workArea);
+    const { x, y, width, height } = next;
     const current = mainWindow.getBounds();
     if (width !== current.width || height !== current.height || x !== current.x || y !== current.y) {
-      mainWindow.setBounds({ x, y, width, height }, false);
+      mainWindow.setBounds(next, false);
     }
   }
 });

@@ -1,3 +1,14 @@
+import type { Task, TaskColor } from '../types';
+
+export const TASK_PALETTE: Record<TaskColor, string> = {
+  default: '#a9c2b5', mint: '#9fd7b5', blue: '#91c6e5',
+  amber: '#e2be83', rose: '#dfa19e', violet: '#b9a9dc',
+};
+
+export function taskCardColor(task: Pick<Task, 'cardColor' | 'color'>): string | undefined {
+  return task.cardColor ?? (task.color === 'default' ? undefined : TASK_PALETTE[task.color]);
+}
+
 function channelLuminance(value: number): number {
   const channel = value / 255;
   return channel <= 0.03928 ? channel / 12.92 : ((channel + 0.055) / 1.055) ** 2.4;

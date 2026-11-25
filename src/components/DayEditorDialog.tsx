@@ -1,42 +1,32 @@
 import { useEffect, useRef, useState, type ClipboardEvent, type CSSProperties, type KeyboardEvent } from 'react';
-import { Check, Plus, Repeat2, Trash2, X } from 'lucide-react';
+import { ArrowRight, Check, Plus, Repeat2, Trash2, X } from 'lucide-react';
+import { TASK_PALETTE } from '../lib/appearance';
 import { fullDateLabel } from '../lib/date';
-import { sortTasks } from '../lib/tasks';
-import type { RepeatRule, Settings, Task, TaskColor } from '../types';
+import { createTask, sortTasks } from '../lib/tasks';
+import { DEFAULT_RECURRENCE, normalizeRecurrence, REPEAT_OPTIONS } from '../lib/recurrence';
+import { clockTime, isTaskTimeRange, timeInMinutes } from '../lib/taskTime';
+import { RecurrenceFields } from './RecurrenceFields';
+import type { RecurrencePattern, Settings, Task, TaskColor, TaskRolloverMode } from '../types';
 
-const REPEAT_OPTIONS: { value: RepeatRule; label: string }[] = [
-  { value: 'none', label: '不重复' },
-  { value: 'daily', label: '每天' },
-  { value: 'weekly', label: '每周' },
-  { value: 'monthly', label: '每月' },
-  { value: 'yearly', label: '每年' },
+const ROLLOVER_OPTIONS: { value: TaskRolloverMode | undefined; label: string; short: string }[] = [
+  { value: undefined, label: '跟随全局', short: '顺延' },
+  { value: 'on', label: '单独开启', short: '顺延·开' },
+  { value: 'off', label: '单独关闭', short: '顺延·关' },
 ];
 
-const COLOR_OPTIONS: { value: TaskColor; label: string; color: string }[] = [
-  { value: 'default', label: '默认', color: '#a9c2b5' },
-  { value: 'mint', label: '薄荷', color: '#9fd7b5' },
-  { value: 'blue', label: '晴蓝', color: '#91c6e5' },
-  { value: 'amber', label: '暖黄', color: '#e2be83' },
-  { value: 'rose', label: '绯红', color: '#dfa19e' },
-  { value: 'violet', label: '雾紫', color: '#b9a9dc' },
+const COLOR_OPTIONS: { value: TaskColor; label: string }[] = [
+  { value: 'default', label: '默认' },
+  { value: 'mint', label: '薄荷' },
+  { value: 'blue', label: '晴蓝' },
+  { value: 'amber', label: '暖黄' },
+  { value: 'rose', label: '绯红' },
+  { value: 'violet', label: '雾紫' },
 ];
 
 const LINE_PREFIX = /^\s*(?:\d+[.)、]\s*|•\s*)/;
 
 function createEmptyTask(date: string): Task {
-  return {
-    id: crypto.randomUUID(),
-    title: '',
-    notes: '',
-    date,
-    time: '',
-    completed: false,
-    createdAt: new Date().toISOString(),
-    originalDate: date,
-    rolloverCount: 0,
-    repeat: 'none',
-    color: 'default',
-  };
+  return createTask(date);
 }
 
 function stripLinePrefix(line: string): string {
@@ -114,6 +104,7 @@ function reconcileRows(previous: Task[], lines: string[], date: string): Task[] 
       ...createEmptyTask(date),
       title: line,
       repeat: template?.repeat ?? 'none',
+      recurrence: template?.recurrence,
       color: template?.color ?? 'default',
     };
   });
@@ -123,22 +114,53 @@ interface DayEditorDialogProps {
   date: string;
   tasks: Task[];
   initialTaskId?: string;
+  initialTime?: Pick<Task, 'time' | 'endTime'>;
   settings: Settings;
-  onAutoSave: (tasks: Task[]) => void;
-  onSave: (tasks: Task[]) => void;
+  onAutoSave: (tasks: Task[], managed: ReadonlySet<string>) => void;
+  onSave: (tasks: Task[], managed: ReadonlySet<string>) => void;
   onCancelSeries: (taskId: string) => void;
   onClose: () => void;
 }
 
 const AUTO_SAVE_DELAY = 400;
 
-export function DayEditorDialog({ date, tasks, initialTaskId, settings, onAutoSave, onSave, onCancelSeries, onClose }: DayEditorDialogProps) {
-  const initialRows = [...sortTasks(tasks, settings.completedToBottom), createEmptyTask(date)];
+function TaskTimeEditor({ task, onChange }: { task: Task; onChange: (patch: Partial<Task>) => void }) {
+  const [invalid, setInvalid] = useState<{ start: string; end: string } | null>(null);
+  const start = invalid?.start ?? task.time;
+  const end = invalid?.end ?? task.endTime ?? '';
+
+  function change(nextStart: string, nextEnd: string) {
+    if (!isTaskTimeRange(nextStart, nextEnd)) {
+      setInvalid({ start: nextStart, end: nextEnd });
+      return;
+    }
+    setInvalid(null);
+    onChange({ time: nextStart, endTime: nextEnd || undefined });
+  }
+
+  return <>
+    <label>开始 <input type="time" value={start} aria-label="选中行开始时间" onChange={(event) => {
+      const next = event.target.value;
+      const nextEnd = !next ? '' : !start ? clockTime(timeInMinutes(next) + 60) : end;
+      change(next, nextEnd);
+    }} /></label>
+    <label>结束 <input type="time" value={end} disabled={!start} aria-label="选中行结束时间" onChange={(event) => change(start, event.target.value)} /></label>
+    {invalid && <span className="editor-time-message" role="status">起止不能相同</span>}
+    {!invalid && start && end && end < start && <span className="editor-time-message">次日结束</span>}
+    <button type="button" className="editor-clear-reminder" title="清空选中行的时间段与提醒"
+      disabled={!start && !end} onClick={() => change('', '')}>清除提醒</button>
+  </>;
+}
+
+export function DayEditorDialog({ date, tasks, initialTaskId, initialTime, settings, onAutoSave, onSave, onCancelSeries, onClose }: DayEditorDialogProps) {
+  const initialRows = [...sortTasks(tasks, settings.completedToBottom), { ...createEmptyTask(date), ...initialTime }];
   const multiRow = settings.editorInputStyle === 'multi-row';
   const [rows, setRows] = useState<Task[]>(initialRows);
   const [text, setText] = useState(() => initialRows.map((row) => row.title).join('\n'));
   const [activeLine, setActiveLine] = useState(0);
   const [showRepeat, setShowRepeat] = useState(false);
+  const [showRollover, setShowRollover] = useState(false);
+  const [customRepeat, setCustomRepeat] = useState<RecurrencePattern | null>(null);
   const [showColors, setShowColors] = useState(false);
   const editorRef = useRef<HTMLDivElement>(null);
   const gutterRef = useRef<HTMLDivElement>(null);
@@ -146,6 +168,7 @@ export function DayEditorDialog({ date, tasks, initialTaskId, settings, onAutoSa
   const selectedIndex = Math.min(activeLine, rows.length - 1);
   const selected = rows[selectedIndex] ?? rows[0];
   const rowsRef = useRef(rows);
+  const managedIds = useRef(new Set(tasks.map(task => task.id)));
   const autoSaveRef = useRef(onAutoSave);
   const dirtyRef = useRef(false);
   const saveTimerRef = useRef<number | null>(null);
@@ -155,6 +178,7 @@ export function DayEditorDialog({ date, tasks, initialTaskId, settings, onAutoSa
   useEffect(() => { autoSaveRef.current = onAutoSave; }, [onAutoSave]);
 
   function collectTasks(): Task[] {
+    rowsRef.current.forEach(row => managedIds.current.add(row.id));
     return rowsRef.current.filter((row) => row.title.trim()).map((row) => ({ ...row, title: row.title.trim() }));
   }
 
@@ -165,7 +189,7 @@ export function DayEditorDialog({ date, tasks, initialTaskId, settings, onAutoSa
     }
     if (!dirtyRef.current) return;
     dirtyRef.current = false;
-    autoSaveRef.current(collectTasks());
+    autoSaveRef.current(collectTasks(), new Set(managedIds.current));
   }
 
   useEffect(() => {
@@ -179,7 +203,7 @@ export function DayEditorDialog({ date, tasks, initialTaskId, settings, onAutoSa
       saveTimerRef.current = null;
       if (!dirtyRef.current) return;
       dirtyRef.current = false;
-      autoSaveRef.current(collectTasks());
+      autoSaveRef.current(collectTasks(), new Set(managedIds.current));
     }, AUTO_SAVE_DELAY);
     return () => {
       if (saveTimerRef.current !== null) {
@@ -384,7 +408,7 @@ export function DayEditorDialog({ date, tasks, initialTaskId, settings, onAutoSa
       const template = current[index];
       next.splice(index, 1, ...merged.map((title, offset) => offset === 0
         ? { ...(template ?? createEmptyTask(date)), title }
-        : { ...createEmptyTask(date), title, repeat: template?.repeat ?? 'none', color: template?.color ?? 'default' }));
+        : { ...createEmptyTask(date), title, repeat: template?.repeat ?? 'none', recurrence: template?.recurrence, color: template?.color ?? 'default' }));
       return next;
     });
     setActiveLine(index + merged.length - 1);
@@ -434,7 +458,8 @@ export function DayEditorDialog({ date, tasks, initialTaskId, settings, onAutoSa
       saveTimerRef.current = null;
     }
     dirtyRef.current = false;
-    onSave(sortTasks(collectTasks(), settings.completedToBottom));
+    const tasksToSave = sortTasks(collectTasks(), settings.completedToBottom);
+    onSave(tasksToSave, new Set(managedIds.current));
   }
 
   const editorStyle = {
@@ -518,13 +543,7 @@ export function DayEditorDialog({ date, tasks, initialTaskId, settings, onAutoSa
         </div>
 
         <div className="editor-selected-meta">
-          <span>选中行时间</span>
-          <input
-            type="time"
-            value={selected?.time ?? ''}
-            aria-label="选中行时间"
-            onChange={(event) => updateSelected({ time: event.target.value })}
-          />
+          {selected && <TaskTimeEditor key={selected.id} task={selected} onChange={updateSelected} />}
           <span className="editor-line-count">{rows.filter((row) => row.title.trim()).length} 行</span>
         </div>
 
@@ -536,17 +555,34 @@ export function DayEditorDialog({ date, tasks, initialTaskId, settings, onAutoSa
           ><Check size={15} /><span>{selected?.completed ? '恢复' : '完成'}</span></button>
 
           <div className="editor-tool-wrap">
-            <button type="button" className={selected?.repeat !== 'none' ? 'is-active' : ''} onClick={() => { setShowRepeat(!showRepeat); setShowColors(false); }}>
+            <button type="button" className={selected?.repeat !== 'none' ? 'is-active' : ''} onClick={() => { setShowRepeat(!showRepeat); setCustomRepeat(null); setShowColors(false); setShowRollover(false); }}>
               <Repeat2 size={15} /><span>{REPEAT_OPTIONS.find((option) => option.value === selected?.repeat)?.label ?? '不重复'}</span>
             </button>
             {showRepeat && (
-              <div className="editor-popover repeat-popover">
-                {REPEAT_OPTIONS.map((option) => (
+              <div className={`editor-popover repeat-popover ${customRepeat ? 'repeat-popover-custom' : ''}`}>
+                {customRepeat ? <>
+                  <RecurrenceFields date={date} value={customRepeat} onChange={setCustomRepeat} />
+                  <div className="recurrence-actions">
+                    <button type="button" onClick={() => setCustomRepeat(null)}>返回</button>
+                    <button type="button" disabled={!normalizeRecurrence(customRepeat)
+                      || (customRepeat.end.type === 'until' && customRepeat.end.date < date)} onClick={() => {
+                      const recurrence = normalizeRecurrence(customRepeat);
+                      if (!recurrence) return;
+                      updateSelected({ repeat: 'custom', recurrence });
+                      setShowRepeat(false);
+                      setCustomRepeat(null);
+                    }}>应用规则</button>
+                  </div>
+                </> : REPEAT_OPTIONS.map((option) => (
                   <button
                     type="button"
                     key={option.value}
                     className={selected?.repeat === option.value ? 'is-active' : ''}
                     onClick={() => {
+                      if (option.value === 'custom') {
+                        setCustomRepeat(selected?.recurrence ?? DEFAULT_RECURRENCE);
+                        return;
+                      }
                       setShowRepeat(false);
                       if (option.value === 'none' && selected?.repeat !== 'none') {
                         if (!window.confirm('取消重复会删除这一系列在所有日期上的日程，确定吗？')) return;
@@ -554,7 +590,7 @@ export function DayEditorDialog({ date, tasks, initialTaskId, settings, onAutoSa
                         removeSelectedLine();
                         return;
                       }
-                      updateSelected({ repeat: option.value });
+                      updateSelected({ repeat: option.value, recurrence: undefined, recurrenceStart: undefined, recurrenceExcludedDates: undefined });
                     }}
                   >{option.label}{selected?.repeat === option.value && <Check size={12} />}</button>
                 ))}
@@ -563,24 +599,47 @@ export function DayEditorDialog({ date, tasks, initialTaskId, settings, onAutoSa
           </div>
 
           <div className="editor-tool-wrap">
-            <button type="button" onClick={() => { setShowColors(!showColors); setShowRepeat(false); }}>
-              <span className="toolbar-color" data-color={selected?.color ?? 'default'} />颜色
+            <button type="button" aria-label="选中行顺延" aria-expanded={showRollover} className={selected?.rolloverMode ? 'is-active' : ''} onClick={() => {
+              setShowRollover(!showRollover);
+              setShowRepeat(false);
+              setShowColors(false);
+            }}><ArrowRight size={15} /><span>{ROLLOVER_OPTIONS.find(option => option.value === selected?.rolloverMode)?.short}</span></button>
+            {showRollover && <div className="editor-popover repeat-popover">
+              {ROLLOVER_OPTIONS.map(({ value, label }) => <button key={label} type="button" className={value === selected?.rolloverMode ? 'is-active' : ''} onClick={() => {
+                updateSelected({ rolloverMode: value });
+                setShowRollover(false);
+              }}>{label}{value === selected?.rolloverMode && <Check size={12} />}</button>)}
+            </div>}
+          </div>
+
+          <div className="editor-tool-wrap">
+            <button type="button" aria-expanded={showColors} onClick={() => { setShowColors(!showColors); setShowRepeat(false); setShowRollover(false); }}>
+              <span className="toolbar-color" data-color={selected?.color ?? 'default'} style={{ backgroundColor: selected?.cardColor }} />颜色
             </button>
             {showColors && (
-              <div className="editor-popover color-popover">
-                {COLOR_OPTIONS.map((option) => (
+              <div className="editor-popover color-popover" role="group" aria-label="日程颜色">
+                <div className="editor-color-presets">{COLOR_OPTIONS.map((option) => (
                   <button
                     type="button"
                     key={option.value}
                     aria-label={option.label}
                     title={option.label}
-                    className={selected?.color === option.value ? 'is-active' : ''}
+                    aria-pressed={!selected?.cardColor && selected?.color === option.value}
+                    className={!selected?.cardColor && selected?.color === option.value ? 'is-active' : ''}
                     onClick={() => {
-                      updateSelected({ color: option.value });
+                      updateSelected({ color: option.value, cardColor: undefined });
                       setShowColors(false);
                     }}
-                  ><span style={{ background: option.color }} /></button>
-                ))}
+                  ><span style={{ background: TASK_PALETTE[option.value] }} /></button>
+                ))}</div>
+                <label className="editor-custom-color">
+                  <span>日／周卡片背景</span>
+                  <input type="color" aria-label="日／周卡片背景"
+                    value={selected?.cardColor ?? TASK_PALETTE[selected?.color ?? 'default']}
+                    onChange={event => updateSelected({ cardColor: event.target.value })} />
+                </label>
+                {selected?.cardColor && <button className="editor-reset-color" type="button"
+                  onClick={() => updateSelected({ cardColor: undefined })}>恢复预设</button>}
               </div>
             )}
           </div>

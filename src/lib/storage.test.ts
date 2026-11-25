@@ -2,6 +2,46 @@ import { describe, expect, it } from 'vitest';
 import { DEFAULT_SETTINGS, normalizeAppState } from './storage';
 
 describe('state normalization', () => {
+  it('defaults to month with the view switch shown and preserves explicit view preferences', () => {
+    const defaults = normalizeAppState({ settings: {} }).settings;
+    expect(defaults).toMatchObject({ calendarView: 'month', showCalendarViewSwitch: true, currentTimeLineColor: '#ff8d87' });
+    const saved = normalizeAppState({ settings: { calendarView: 'week', showCalendarViewSwitch: false, currentTimeLineColor: '#16C7A9' } }).settings;
+    expect(saved).toMatchObject({ calendarView: 'week', showCalendarViewSwitch: false, currentTimeLineColor: '#16C7A9' });
+    expect(normalizeAppState({ settings: { currentTimeLineColor: 'red' } }).settings.currentTimeLineColor).toBe('#ff8d87');
+  });
+
+  it('inherits legacy task sizes and preserves independent day and week font limits', () => {
+    const legacy = normalizeAppState({ settings: { taskBaseFontSize: 14, taskMinFontSize: 9 } }).settings;
+    expect(legacy).toMatchObject({ dayTaskBaseFontSize: 14, dayTaskMinFontSize: 9, weekTaskBaseFontSize: 14, weekTaskMinFontSize: 9 });
+    const saved = normalizeAppState({ settings: { ...legacy, dayTaskBaseFontSize: 8, dayTaskMinFontSize: 12, weekTaskMinFontSize: 11 } }).settings;
+    expect(saved).toMatchObject({ taskBaseFontSize: 14, taskMinFontSize: 9, dayTaskBaseFontSize: 8, dayTaskMinFontSize: 8, weekTaskBaseFontSize: 14, weekTaskMinFontSize: 11 });
+  });
+
+  it('round-trips custom schedule card colors and ignores invalid legacy values', () => {
+    const state = normalizeAppState({ tasks: [
+      { id: 'custom', date: '2026-11-25', title: 'Custom', color: 'mint', cardColor: '#123ABC' },
+      { id: 'legacy', date: '2026-11-25', title: 'Legacy', color: 'blue' },
+      { id: 'invalid', date: '2026-11-25', title: 'Invalid', cardColor: 'red' },
+    ] });
+    expect(state.tasks[0]).toMatchObject({ color: 'mint', cardColor: '#123ABC' });
+    expect(state.tasks[1]).not.toHaveProperty('cardColor');
+    expect(state.tasks[2]).not.toHaveProperty('cardColor');
+    expect(normalizeAppState(JSON.parse(JSON.stringify(state))).tasks).toEqual(state.tasks);
+  });
+
+  it('preserves legacy single times and valid overnight ranges without inventing end times', () => {
+    const state = normalizeAppState({ tasks: [
+      { id: 'legacy', title: '旧提醒', date: '2026-11-25', time: '08:15' },
+      { id: 'night', title: '夜间测试', date: '2026-11-25', time: '23:30', endTime: '01:00' },
+      { id: 'invalid', title: '旧空白', date: '2026-11-25', time: '', endTime: '01:00' },
+    ] });
+    expect(state.tasks[0]).toMatchObject({ time: '08:15' });
+    expect(state.tasks[0]).not.toHaveProperty('endTime');
+    expect(state.tasks[1]).toMatchObject({ time: '23:30', endTime: '01:00' });
+    expect(state.tasks[2]).not.toHaveProperty('endTime');
+    expect(normalizeAppState(JSON.parse(JSON.stringify(state))).tasks).toEqual(state.tasks);
+  });
+
   it('fills new settings without removing existing tasks', () => {
     const state = normalizeAppState({
       tasks: [{ id: 'one', title: '保留任务', date: '2026-11-11' }],

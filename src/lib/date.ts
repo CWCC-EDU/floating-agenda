@@ -12,6 +12,7 @@ export interface CalendarDayOptions {
   weekStartsOn?: number;
   today?: string;
   selectedDate?: string;
+  firstWeek?: string;
 }
 
 export interface FestivalOptions {
@@ -66,8 +67,9 @@ export function getCalendarDays(month: string, options: CalendarDayOptions = {})
     const anchor = preferredAnchor && startOfMonth(preferredAnchor) === monthStart ? preferredAnchor : monthStart;
     first = startOfWeek(anchor, weekStartsOn);
     if (layout === 'floating-month') {
-      first = addDays(first, -Math.min(5, Math.max(0, options.elapsedWeeks ?? 0)) * 7);
+      first = addDays(first, -Math.min(maxRows - 1, Math.max(0, options.elapsedWeeks ?? 0)) * 7);
     }
+    if (options.firstWeek) first = startOfWeek(options.firstWeek, weekStartsOn);
   }
 
   let rowCount = maxRows;
@@ -83,6 +85,10 @@ export function getCalendarDays(month: string, options: CalendarDayOptions = {})
     const columnIndex = index % columns;
     return addDays(first, weekIndex * 7 + columnIndex);
   });
+}
+
+export function adjacentCalendarPage(firstWeek: string, rows: number, direction: -1 | 1): string {
+  return addDays(firstWeek, direction * rows * 7);
 }
 
 export function daysBetween(from: string, to: string): number {
