@@ -198,8 +198,13 @@ export function updateDayTasks(tasks: Task[], date: string, edited: Task[], mana
   return extendRecurringTasks(merged, today).tasks;
 }
 
-export function removeTaskSeries(tasks: Task[], seriesId: string): Task[] {
-  return tasks.filter((task) => task.seriesId !== seriesId);
+export function cancelTaskSeriesFrom(tasks: Task[], seriesId: string, cutoff: string): Task[] {
+  return tasks.flatMap(task => {
+    if ((task.seriesId ?? (task.repeat !== 'none' ? task.id : undefined)) !== seriesId) return [task];
+    if (scheduledDate(task) >= cutoff && !task.completed) return [];
+    return [{ ...task, repeat: 'none', seriesId: undefined, recurrence: undefined, recurrenceStart: undefined,
+      recurrenceExcludedDates: undefined, scheduledRepeatDate: undefined }];
+  });
 }
 
 export function sortTasks(tasks: Task[], completedToBottom = true): Task[] {

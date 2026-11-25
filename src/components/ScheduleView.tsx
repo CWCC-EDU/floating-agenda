@@ -26,6 +26,7 @@ interface ScheduleViewProps {
   onSelectDate(date: string): void;
   onOpenTask(task: Task, displayedDate: string): void;
   onTaskMenu(task: Task, event: MouseEvent<HTMLElement>): void;
+  onLeaveTaskCell(cell: HTMLElement): void;
   onCreate(date: string, time?: TaskTime): void;
 }
 
@@ -50,10 +51,11 @@ interface ScheduleTaskCellProps {
   minFontSize: number;
   rest?: boolean;
   onCreate(date: string): void;
+  onLeave(cell: HTMLElement): void;
   children: ReactNode;
 }
 
-function ScheduleTaskCell({ date, kind, preferredFontSize, minFontSize, rest, onCreate, children }: ScheduleTaskCellProps) {
+function ScheduleTaskCell({ date, kind, preferredFontSize, minFontSize, rest, onCreate, onLeave, children }: ScheduleTaskCellProps) {
   const cellRef = useRef<HTMLDivElement>(null);
   const contentRef = useRef<HTMLDivElement>(null);
 
@@ -96,7 +98,7 @@ function ScheduleTaskCell({ date, kind, preferredFontSize, minFontSize, rest, on
   }, [children, minFontSize, preferredFontSize]);
 
   return (
-    <div ref={cellRef} className={'schedule-' + kind + '-cell' + (rest ? ' is-rest-day' : '')} data-date={date} onDoubleClick={event => {
+    <div ref={cellRef} className={'schedule-' + kind + '-cell' + (rest ? ' is-rest-day' : '')} data-date={date} onPointerLeave={event => onLeave(event.currentTarget)} onDoubleClick={event => {
       if (!(event.target as HTMLElement).closest('button,input')) onCreate(date);
     }}>
       <div ref={contentRef} className="schedule-task-content">{children}</div>
@@ -106,7 +108,7 @@ function ScheduleTaskCell({ date, kind, preferredFontSize, minFontSize, rest, on
 
 export function ScheduleView({
   view, dates, today, selectedDate, settings,
-  getDayTasks, getGhostTasks, renderTask, renderGhostTask, taskColor, onSelectDate, onOpenTask, onTaskMenu, onCreate,
+  getDayTasks, getGhostTasks, renderTask, renderGhostTask, taskColor, onSelectDate, onOpenTask, onTaskMenu, onLeaveTaskCell, onCreate,
 }: ScheduleViewProps) {
   const timeline = view === 'day' ? settings.showDayTimeAxis : settings.showWeekTimeAxis;
   const baseFontSize = view === 'day' ? settings.dayTaskBaseFontSize : settings.weekTaskBaseFontSize;
@@ -204,7 +206,7 @@ export function ScheduleView({
       {timeline && <div className="schedule-grid schedule-all-day" role="group" aria-label="全天">
         <span className="schedule-gutter">全天</span>
         {days.map(({ date, allDay, ghosts }) => (
-          <ScheduleTaskCell key={date} kind="all-day" date={date} preferredFontSize={preferredSize(allDay.length + ghosts.length)} minFontSize={minFontSize} onCreate={onCreate}>
+          <ScheduleTaskCell key={date} kind="all-day" date={date} preferredFontSize={preferredSize(allDay.length + ghosts.length)} minFontSize={minFontSize} onLeave={onLeaveTaskCell} onCreate={onCreate}>
             {allDay.map(renderTask)}{ghosts.map(renderGhostTask)}
           </ScheduleTaskCell>
         ))}
@@ -233,7 +235,7 @@ export function ScheduleView({
                   title={taskTimeLabel(event.task.time, event.task.endTime) + ' ' + event.task.title}
                   onContextMenu={mouseEvent => onTaskMenu(event.task, mouseEvent)}
                   onClick={() => onOpenTask(event.task, date)}>
-                  <span className="schedule-event-title">{event.task.completed && settings.showCompletedIcon && <Check size={11} />}{event.task.title}</span>
+                  <span className="schedule-event-title">{event.task.completed && settings.showCompletedIcon && <Check size={11} />}<span className="task-title-text">{event.task.title}</span></span>
                   {event.end - event.start >= 40 && <small>{event.continuing ? '00:00–' + clockTime(event.to) : taskTimeLabel(event.task.time, event.task.endTime)}</small>}
                 </button>
               );
@@ -246,7 +248,7 @@ export function ScheduleView({
         ))}
       </div> : <div className="schedule-grid schedule-list">
         {days.map(({ date, tasks, ghosts, rest }) => (
-          <ScheduleTaskCell key={date} kind="list" date={date} preferredFontSize={preferredSize(tasks.length + ghosts.length)} minFontSize={minFontSize} rest={rest} onCreate={onCreate}>
+          <ScheduleTaskCell key={date} kind="list" date={date} preferredFontSize={preferredSize(tasks.length + ghosts.length)} minFontSize={minFontSize} rest={rest} onLeave={onLeaveTaskCell} onCreate={onCreate}>
             {tasks.map(renderTask)}
             {ghosts.map(renderGhostTask)}
             {tasks.length === 0 && ghosts.length === 0 && <span className="schedule-empty">无日程</span>}

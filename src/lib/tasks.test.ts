@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { addDays, addMonths, adjacentCalendarPage, daysBetween, festivalLabel, getCalendarColumns, getCalendarDays, getWeekDays, getWeekNumber, lunarDateLabel, nextRepeatDate, solarTermLabel, toDateKey, yiJiLabel } from './date';
-import { extendRecurringTasks, removeTaskSeries, rolloverTasks, sortTasks, updateDayTasks } from './tasks';
+import { extendRecurringTasks, cancelTaskSeriesFrom, rolloverTasks, sortTasks, updateDayTasks } from './tasks';
 import { layoutScheduleEvents } from './schedule';
 import { isTaskTimeRange, timeAxisSegment } from './taskTime';
 import type { Task } from '../types';
@@ -315,15 +315,21 @@ describe('extendRecurringTasks', () => {
   });
 });
 
-describe('removeTaskSeries', () => {
-  it('removes every occurrence in the series and keeps unrelated tasks', () => {
+describe('cancelTaskSeriesFrom', () => {
+  it('retains older and completed occurrences, removing only pending occurrences on and after the cutoff', () => {
     const tasks = [
       task({ id: 'seed', date: '2026-11-10', repeat: 'daily', seriesId: 'seed' }),
       task({ id: 'future', date: '2026-11-11', repeat: 'daily', seriesId: 'seed' }),
       task({ id: 'done', date: '2026-11-09', repeat: 'daily', seriesId: 'seed', completed: true }),
+      task({ id: 'later-done', date: '2026-11-12', repeat: 'daily', seriesId: 'seed', completed: true }),
+      task({ id: 'rolled', date: '2026-11-11', scheduledRepeatDate: '2026-11-09', repeat: 'daily', seriesId: 'seed' }),
       task({ id: 'plain', date: '2026-11-11' }),
     ];
-    expect(removeTaskSeries(tasks, 'seed').map((item) => item.id)).toEqual(['plain']);
+    const retained = cancelTaskSeriesFrom(tasks, 'seed', '2026-11-11');
+    expect(retained.map(item => item.id)).toEqual(['seed', 'done', 'later-done', 'rolled', 'plain']);
+    expect(retained.filter(task => task.completed).map(task => task.id)).toEqual(['done', 'later-done']);
+    expect(retained.every(task => task.repeat === 'none' && !task.seriesId)).toBe(true);
+    expect(extendRecurringTasks(retained, '2026-11-11')).toEqual({ tasks: retained, added: 0 });
   });
 });
 

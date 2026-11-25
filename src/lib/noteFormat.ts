@@ -1,3 +1,21 @@
+import type { NotePatch, StickyNote } from '../types';
+
+export function applyNotePatch(note: StickyNote, patch: NotePatch): StickyNote {
+  const { removedImageIds, ...changes } = patch;
+  const images = removedImageIds?.length ? note.images?.filter(image => !removedImageIds.includes(image.id)) : note.images;
+  return { ...note, ...changes, images };
+}
+
+export function noteImageElement(id: string): HTMLImageElement {
+  const image = document.createElement('img');
+  image.dataset.noteImage = id;
+  image.className = 'note-inline-image';
+  image.alt = '便签图片';
+  image.draggable = false;
+  image.contentEditable = 'false';
+  return image;
+}
+
 export const NOTE_COLORS = [
   { label: '红色', value: '#ff7676' },
   { label: '橙色', value: '#ffb873' },
@@ -53,6 +71,10 @@ export function cleanNoteHtml(html: string): string {
     }
 
     const tag = node.tagName;
+    if (tag === 'IMG') {
+      if (node.dataset.noteImage) parent.append(noteImageElement(node.dataset.noteImage));
+      return;
+    }
     const color = safeColor(node.style.color || (tag === 'FONT' ? node.getAttribute('color') ?? '' : ''));
     const decoration = node.style.textDecorationLine.split(' ').filter(value => value === 'line-through' || value === 'underline').join(' ');
     const bold = node.style.fontWeight === 'bold' || Number(node.style.fontWeight) >= 600;

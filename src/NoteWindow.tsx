@@ -2,7 +2,7 @@ import { Bold, ImagePlus, Italic, List, Minus, Palette, Plus, Strikethrough, Sti
 import { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react';
 import type { CSSProperties, MouseEvent, PointerEvent } from 'react';
 import type { NoteFormat, NotePatch, NoteStatePayload } from './types';
-import { NOTE_COLORS, cleanNoteHtml, noteCheckHtml, setNoteCheck } from './lib/noteFormat';
+import { NOTE_COLORS, applyNotePatch, cleanNoteHtml, noteCheckHtml, noteImageElement, setNoteCheck } from './lib/noteFormat';
 
 const NOTE_HEIGHT_PADDING = 8;
 const TEXT_TOOLS = [
@@ -28,10 +28,15 @@ export default function NoteWindow() {
   const [imageStatus, setImageStatus] = useState('');
   const [insertingImage, setInsertingImage] = useState(false);
   const formatRange = useRef<Range | null>(null);
+  const localImage = useRef<{ id: string; range: Range | null } | null>(null);
+  const knownImages = useRef(new Set<string>());
+  const activeImages = useRef<string[]>([]);
+  const hydrated = useRef(false);
   const shownContent = useRef<NoteContent | null>(null);
   const pendingContent = useRef<NoteContent | null>(null);
   const noteText = data?.note.text;
   const richText = data?.note.richText;
+  const attachedImages = data?.note.images;
   const defaultColor = data?.appearance.noteTextColor;
   const desktop = window.desktop;
 
@@ -56,7 +61,7 @@ export default function NoteWindow() {
   }, [desktop, noteId]);
 
   const update = useCallback((patch: NotePatch) => {
-    setData((current) => current ? { ...current, note: { ...current.note, ...patch } } : current);
+    setData((current) => current ? { ...current, note: applyNotePatch(current.note, patch) } : current);
     desktop?.sendNoteChange(noteId, patch);
   }, [desktop, noteId]);
 
@@ -65,23 +70,68 @@ export default function NoteWindow() {
     if (!editor) return;
     const text = editor.innerText.replaceAll('\u00a0', ' ');
     const patch = { text, richText: cleanNoteHtml(editor.innerHTML) };
-    if (shownContent.current?.text === patch.text && shownContent.current.richText === patch.richText) return;
+    const present = new Set(Array.from(editor.querySelectorAll<HTMLImageElement>('img[data-note-image]'), image => image.dataset.noteImage));
+    const removedImageIds = activeImages.current.filter(id => knownImages.current.has(id) && !present.has(id));
+    if (!removedImageIds.length && shownContent.current?.text === patch.text && shownContent.current.richText === patch.richText) return;
     shownContent.current = patch;
     pendingContent.current = patch;
-    editor.dataset.empty = String(!text.trim());
-    update(patch);
+    editor.dataset.empty = String(!text.trim() && !present.size);
+    if (removedImageIds.length) activeImages.current = activeImages.current.filter(id => !removedImageIds.includes(id));
+    update({ ...patch, removedImageIds });
   }, [update]);
 
   useLayoutEffect(() => {
     const editor = editorRef.current;
     if (!editor || noteText === undefined) return;
-    if (shownContent.current?.text === noteText && shownContent.current.richText === richText) return;
-    if (pendingContent.current || (editingRef.current && shownContent.current)) return;
-    if (richText === undefined) editor.textContent = noteText;
-    else editor.innerHTML = cleanNoteHtml(richText);
-    editor.dataset.empty = String(!noteText.trim());
-    shownContent.current = { text: noteText, richText };
-  }, [noteText, richText]);
+    const shown = shownContent.current;
+    const replaceBody = (!shown || shown.text !== noteText || shown.richText !== richText)
+      && !pendingContent.current && (!editingRef.current || !shown);
+    if (replaceBody) {
+      if (richText === undefined) editor.textContent = noteText;
+      else editor.innerHTML = cleanNoteHtml(richText);
+      shownContent.current = { text: noteText, richText };
+    }
+
+    const images = new Map(attachedImages?.map(image => [image.id, image.src]));
+    activeImages.current = [...images.keys()];
+    const rendered = new Set<string>();
+    editor.querySelectorAll<HTMLImageElement>('img[data-note-image]').forEach(element => {
+      const id = element.dataset.noteImage!;
+      const src = images.get(id);
+      if (!src) { element.remove(); return; }
+      if (element.getAttribute('src') !== src) element.src = src;
+      rendered.add(id);
+    });
+
+    let inserted = false;
+    images.forEach((source, id) => {
+      if (rendered.has(id) || (knownImages.current.has(id) && !replaceBody)) return;
+      const pending = localImage.current?.id === id ? localImage.current : null;
+      const anchor = hydrated.current && !replaceBody ? (pending ? pending.range : formatRange.current) : null;
+      const image = noteImageElement(id);
+      image.src = source;
+      if (anchor && editor.contains(anchor.commonAncestorContainer)) {
+        const caret = anchor.cloneRange();
+        caret.collapse(false);
+        caret.insertNode(image);
+        caret.setStartAfter(image);
+        caret.collapse(true);
+        formatRange.current = caret;
+        if (document.activeElement === editor) {
+          const selection = window.getSelection();
+          selection?.removeAllRanges();
+          selection?.addRange(caret);
+        }
+      } else editor.append(image);
+      if (pending) localImage.current = null;
+      rendered.add(id);
+      inserted = true;
+    });
+    images.forEach((_src, id) => knownImages.current.add(id));
+    hydrated.current = true;
+    editor.dataset.empty = String(!noteText.trim() && !rendered.size);
+    if (inserted) saveContent();
+  }, [attachedImages, noteText, richText, saveContent]);
 
   const applyFormat = useCallback((format: NoteFormat | { type: FormatCommand }) => {
     const editor = editorRef.current;
@@ -89,14 +139,14 @@ export default function NoteWindow() {
     const selection = window.getSelection();
     if (!editor || !selection) return;
     const containsRange = range && editor.contains(range.commonAncestorContainer);
-    if (format.type !== 'checkbox' && (!containsRange || range.collapsed)) return;
+    const atCaret = format.type === 'checkbox' || format.type === 'insertUnorderedList';
+    if (!atCaret && (!containsRange || range.collapsed)) return;
     editor.focus({ preventScroll: true });
     if (containsRange) {
       selection.removeAllRanges();
       selection.addRange(range);
-    }
+    } else selection.collapse(editor, editor.childNodes.length);
     if (format.type === 'checkbox') {
-      if (!containsRange) selection.collapse(editor, editor.childNodes.length);
       selection.collapseToEnd();
       document.execCommand('insertHTML', false, noteCheckHtml(false) + '&nbsp;');
     } else if (format.type === 'color') {
@@ -111,9 +161,12 @@ export default function NoteWindow() {
     if (!desktop || insertingImage) return;
     setInsertingImage(true);
     setImageStatus('');
+    const id = crypto.randomUUID();
+    localImage.current = { id, range: formatRange.current?.cloneRange() ?? null };
     try {
-      await desktop.insertNoteImage(noteId);
+      if (!await desktop.insertNoteImage(noteId, id) && localImage.current?.id === id) localImage.current = null;
     } catch {
+      if (localImage.current?.id === id) localImage.current = null;
       setImageStatus('无法插入图片，请检查文件大小和格式。');
     } finally {
       setInsertingImage(false);
@@ -228,7 +281,17 @@ export default function NoteWindow() {
               onFocus={() => { editingRef.current = true; }}
               onBlur={() => { editingRef.current = false; }}
               onInput={saveContent}
-              onClick={(event) => { if (toggleCheck(event.target)) event.preventDefault(); }}
+              onClick={(event) => {
+                if (toggleCheck(event.target)) event.preventDefault();
+                else if (event.target instanceof HTMLImageElement && event.target.dataset.noteImage) {
+                  const range = document.createRange();
+                  range.selectNode(event.target);
+                  const selection = window.getSelection();
+                  event.currentTarget.focus({ preventScroll: true });
+                  selection?.removeAllRanges();
+                  selection?.addRange(range);
+                }
+              }}
               onKeyDown={(event) => {
                 if ((event.key === ' ' || event.key === 'Enter') && toggleCheck(event.target)) event.preventDefault();
               }}
@@ -238,15 +301,12 @@ export default function NoteWindow() {
               }}
               onDrop={(event) => event.preventDefault()}
             />
-              {Boolean(note.images?.length) && <div className="note-images">
-                {note.images?.map(image => <img key={image.id} className="drawing-note-image" src={image.src} alt="便签图片" draggable={false} />)}
-              </div>}
             </div>
           </div>
         </div>
         <footer className="note-format-bar" aria-label="便签文字格式" onMouseDown={(event) => event.preventDefault()}>
           <div className="note-format-actions">
-            {TEXT_TOOLS.map(({ label, icon: Icon, command }) => <button key={command} type="button" disabled={!hasSelection}
+            {TEXT_TOOLS.map(({ label, icon: Icon, command }) => <button key={command} type="button" disabled={command !== 'insertUnorderedList' && !hasSelection}
               aria-label={label} title={label} onClick={() => { setShowColors(false); applyFormat({ type: command }); }}><Icon size={14} /></button>)}
             <button type="button" disabled={insertingImage} aria-label="插入图片" title="插入图片" onClick={() => void insertImage()}><ImagePlus size={14} /></button>
             <button type="button" disabled={!hasSelection} aria-expanded={showColors} aria-label="字体颜色" title="选择文字后更改字体颜色" onClick={() => setShowColors((open) => !open)}><Palette size={14} /></button>

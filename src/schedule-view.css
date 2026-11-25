@@ -159,7 +159,9 @@
 .schedule-event[data-card-color]:hover {
   background: color-mix(in srgb, var(--task-card-background) 91%, var(--task-card-foreground));
 }
-.schedule-event.is-completed { opacity: .6; text-decoration: line-through; }
+.schedule-event { transition: opacity 230ms ease; }
+.schedule-event.is-completed { opacity: .6; }
+@media (prefers-reduced-motion: reduce) { .schedule-event { transition: none; } }
 .schedule-event.is-point { border-style: dashed; border-left-style: solid; }
 .schedule-event-title, .schedule-event small { max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .schedule-event-title {

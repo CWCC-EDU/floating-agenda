@@ -229,7 +229,7 @@ export type NotesAppearance = Pick<
   | 'showNoteCheckbox'
 >;
 
-export type NotePatch = Partial<Pick<StickyNote, 'text' | 'richText' | 'completed'>>;
+export type NotePatch = Partial<Pick<StickyNote, 'text' | 'richText' | 'completed'>> & { removedImageIds?: string[] };
 export type NoteFormat = { type: 'checkbox' | 'strike' } | { type: 'color'; color: string };
 
 export interface NoteStatePayload {
@@ -281,7 +281,7 @@ export interface DesktopBridge {
   exportDrawing: (bytes: Uint8Array) => Promise<boolean>;
   saveDrawingNote: (id: string, bytes: Uint8Array, targetNoteId?: string) => Promise<void>;
   listDrawingNotes: () => Promise<{ id: string; label: string }[]>;
-  insertNoteImage: (id: string) => Promise<boolean>;
+  insertNoteImage: (id: string, imageId: string) => Promise<boolean>;
   showTaskMenu: (request: { id: string; x: number; y: number; editing: boolean; completed: boolean; hasSelection?: boolean }) => void;
   onTaskMenuComplete: (callback: (request: { id: string; editing: boolean; completed: boolean }) => void) => () => void;
   onWorkspaceRequest: (callback: (request: WorkspaceRequest) => void) => () => void;
@@ -312,7 +312,7 @@ export interface DesktopBridge {
   newNote: () => void;
   focusNote: (id: string) => void;
   onNoteState: (callback: (payload: NoteStatePayload) => void) => () => void;
-  onNotesPatch: (callback: (payload: { id: string; patch: Partial<StickyNote> }) => void) => () => void;
+  onNotesPatch: (callback: (payload: { id: string; patch: NotePatch }) => void) => () => void;
   onNotesOpenChanged: (callback: (id: string, open: boolean) => void) => () => void;
   onNotesDeleted: (callback: (id: string) => void) => () => void;
   onNotesCreate: (callback: () => void) => () => void;

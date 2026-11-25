@@ -106,6 +106,18 @@ select { font: inherit; }
 .task-repeat { color: inherit; }
 .task-checkbox { flex: 0 0 auto; width: 11px; height: 11px; margin: 2px 0 0; accent-color: var(--today-color); }
 .calendar-task.is-completed { opacity: 0.52; }
+.calendar-task[data-list-task] { transition: opacity 230ms ease; }
+.calendar-task[data-list-task].is-completed :is(.task-title, .task-number) { text-decoration: none; }
+.task-title-text {
+  background: linear-gradient(currentColor, currentColor) 0 55% / 0 1px no-repeat;
+  box-decoration-break: clone;
+  -webkit-box-decoration-break: clone;
+  transition: background-size 240ms cubic-bezier(.22, .75, .28, 1);
+}
+.is-completed .task-title-text { background-size: 100% 1px; }
+@media (prefers-reduced-motion: reduce) {
+  .calendar-task[data-list-task], .task-title-text { transition: none; }
+}
 
 .day-editor { font-family: var(--editor-font-family), sans-serif; }
 .editor-textarea { color: var(--editor-text-color); font-family: inherit; font-size: var(--editor-font-size); }
@@ -148,7 +160,7 @@ select { font: inherit; }
 .note-window-body .sticky-note { padding: 4px 6px; }
 .note-rich-editor { position: relative; flex: 1; min-width: 0; min-height: 72px; max-height: 420px; overflow: auto; outline: none; font-size: var(--note-font-size); line-height: 1.5; white-space: pre-wrap; overflow-wrap: anywhere; }
 .note-content { flex: 1; display: flex; flex-direction: column; gap: 6px; min-width: 0; }
-.note-images { display: flex; flex-direction: column; gap: 6px; max-height: 390px; overflow: auto; }
+.note-inline-image { display: inline-block; width: auto; max-width: min(100%, 186px); max-height: 270px; vertical-align: middle; border-radius: 3px; cursor: default; }
 .note-rich-editor ul { margin: 0; padding-inline-start: 1.45em; list-style: disc; }
 .note-rich-editor[data-empty='true']::before { content: '写点什么…'; position: absolute; inset: 0; opacity: .4; pointer-events: none; }
 .sticky-note.is-completed .note-rich-editor { text-decoration: line-through; opacity: .5; }

@@ -1,16 +1,17 @@
-import { Fragment, useCallback, useEffect, useMemo, useRef, useState, type CSSProperties, type MouseEvent, type PointerEvent } from 'react';
+import { Fragment, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type CSSProperties, type MouseEvent, type PointerEvent } from 'react';
 import { CalendarDays, Check, ChevronDown, ChevronLeft, ChevronRight, ListChecks, LogOut, Menu, Move, Palette, PenLine, Plus, RefreshCw, Repeat2, Settings2, StickyNote as StickyNoteIcon, Zap } from 'lucide-react';
 import { DayEditorDialog } from './components/DayEditorDialog';
 import { NotesPanel } from './components/NotesPanel';
 import { SettingsDialog } from './components/SettingsDialog';
 import { ScheduleView } from './components/ScheduleView';
 import { addDays, addMonths, adjacentCalendarPage, festivalLabel, fromDateKey, fullDateLabel, getCalendarColumns, getCalendarDays, getWeekDays, getWeekNumber, lunarDateLabel, monthLabel, shortDateLabel, solarTermLabel, startOfMonth, startOfWeek, toDateKey, yiJiLabel } from './lib/date';
-import { createTask, extendRecurringTasks, removeTaskSeries, rolloverTasks, sortTasks, updateDayTasks } from './lib/tasks';
+import { createTask, extendRecurringTasks, cancelTaskSeriesFrom, rolloverTasks, sortTasks, updateDayTasks } from './lib/tasks';
 import { isDateKey, normalizeRecurrence, REPEAT_OPTIONS } from './lib/recurrence';
 import { isTaskTimeRange, taskTimeLabel, timeAxisSegment } from './lib/taskTime';
 import { DEFAULT_SETTINGS, loadAppState, normalizeAppState, saveAppState } from './lib/storage';
 import { readableTextColor, taskCardColor, taskFontSize, TASK_PALETTE } from './lib/appearance';
 import { readLocalSkin, skinImage } from './lib/skins';
+import { applyNotePatch } from './lib/noteFormat';
 import { playSound } from './lib/sound';
 import type { AppState, CalendarView, NutstoreRemoteSummary, NutstoreSyncResult, NutstoreSyncStatus, NotesAppearance, Settings, StickyNote, Task, TaskFilter, WindowAdjustmentMode, WindowResizeEdge, WorkspaceItem } from './types';
 
@@ -33,6 +34,9 @@ export default function App() {
   const [windowFocused, setWindowFocused] = useState(() => document.hasFocus());
   const [localSkin, setLocalSkin] = useState<string | null>(null);
   const [filter, setFilter] = useState<TaskFilter>('all');
+  const [hoveredTaskOrder, setHoveredTaskOrder] = useState<{ date: string; ranks: Map<string, number> } | null>(null);
+  const previousRowPositions = useRef<Map<HTMLElement, number> | null>(null);
+  const rowAnimations = useRef(new WeakMap<HTMLElement, Animation>());
   const [state, setState] = useState<AppState>({ tasks: [], notes: [], settings: DEFAULT_SETTINGS });
   const [isReady, setIsReady] = useState(false);
   const [editor, setEditor] = useState<EditorSelection | null>(null);
@@ -274,7 +278,7 @@ export default function App() {
     const offPatch = window.desktop?.onNotesPatch(({ id, patch }) => {
       setState((current) => ({
         ...current,
-        notes: current.notes.map((note) => note.id === id ? { ...note, ...patch } : note),
+        notes: current.notes.map((note) => note.id === id ? applyNotePatch(note, patch) : note),
       }));
     });
     const offOpen = window.desktop?.onNotesOpenChanged((id, open) => {
@@ -553,12 +557,9 @@ export default function App() {
     setToast('当天日程已保存');
   }
 
-  function cancelTaskSeries(taskId: string) {
-    const target = state.tasks.find((task) => task.id === taskId);
-    const seriesId = target?.seriesId ?? (target && target.repeat !== 'none' ? target.id : undefined);
-    if (!seriesId) return;
-    setState((current) => ({ ...current, tasks: removeTaskSeries(current.tasks, seriesId) }));
-    setToast('已删除该重复任务的全部日程');
+  function cancelTaskSeries(seriesId: string, cutoff: string) {
+    setState(current => ({ ...current, tasks: cancelTaskSeriesFrom(current.tasks, seriesId, cutoff) }));
+    setToast('已取消重复，保留历史与已完成日程');
   }
 
   const setTaskCompletion = useCallback((id: string, completed: boolean) => {
@@ -567,19 +568,48 @@ export default function App() {
     playSound(state.settings.editSaveSound);
   }, [state.settings.editSaveSound]);
 
-  useEffect(() => window.desktop?.onTaskMenuComplete(({ id, editing, completed }) => {
-    if (!editing) setTaskCompletion(id, completed);
-  }), [setTaskCompletion]);
+  useLayoutEffect(() => {
+    const positions = previousRowPositions.current;
+    previousRowPositions.current = null;
+    if (!positions || window.matchMedia('(prefers-reduced-motion: reduce)').matches) return;
+    positions.forEach((top, row) => {
+      if (!row.isConnected) return;
+      rowAnimations.current.get(row)?.cancel();
+      const offset = top - row.getBoundingClientRect().top;
+      if (Math.abs(offset) < 1) return;
+      rowAnimations.current.set(row, row.animate([
+        { transform: 'translateY(' + offset + 'px)' }, { transform: 'translateY(0)' },
+      ], { duration: 285, easing: 'cubic-bezier(.22, .75, .28, 1)' }));
+    });
+  }, [hoveredTaskOrder]);
+
+  useEffect(() => {
+    const reset = () => setHoveredTaskOrder(null);
+    window.addEventListener('blur', reset);
+    return () => window.removeEventListener('blur', reset);
+  }, []);
+
+  useEffect(() => { setHoveredTaskOrder(null); }, [calendarView, monthCursor, monthPageStart, filter, state.settings.showTimeAxis, state.settings.showDayTimeAxis, state.settings.showWeekTimeAxis]);
 
   function toggleTaskCompletion(task: Task) {
     setTaskCompletion(task.id, !task.completed);
   }
 
-  function openTaskMenu(task: Task, event: MouseEvent<HTMLElement>) {
-    if (!window.desktop) return;
+  function toggleTaskFromContext(task: Task, event: MouseEvent<HTMLElement>) {
     event.preventDefault();
     event.stopPropagation();
-    window.desktop.showTaskMenu({ id: task.id, x: event.clientX, y: event.clientY, editing: false, completed: task.completed });
+    const cell = event.currentTarget.closest<HTMLElement>('.day-cell, .schedule-list-cell, .schedule-all-day-cell');
+    if (cell?.dataset.date === task.date && cell.matches(':hover') && hoveredTaskOrder?.date !== task.date) {
+      setHoveredTaskOrder({ date: task.date, ranks: new Map(getDayTasks(task.date).map((row, index) => [row.id, index])) });
+    }
+    toggleTaskCompletion(task);
+  }
+
+  function releaseTaskOrder(cell: HTMLElement) {
+    if (hoveredTaskOrder?.date !== cell.dataset.date) return;
+    previousRowPositions.current = new Map(Array.from(cell.querySelectorAll<HTMLElement>('[data-list-task]'),
+      row => [row, row.getBoundingClientRect().top]));
+    setHoveredTaskOrder(null);
   }
 
   function completeSelectedTask() {
@@ -595,7 +625,9 @@ export default function App() {
   }
 
   function getDayTasks(date: string) {
-    return sortTasks((tasksByDate.get(date) ?? []).filter(matchesFilter), state.settings.completedToBottom);
+    const ranks = hoveredTaskOrder?.date === date ? hoveredTaskOrder.ranks : undefined;
+    const tasks = sortTasks((tasksByDate.get(date) ?? []).filter(task => matchesFilter(task) || ranks?.has(task.id)), state.settings.completedToBottom);
+    return ranks ? tasks.sort((a, b) => (ranks.get(a.id) ?? Infinity) - (ranks.get(b.id) ?? Infinity)) : tasks;
   }
 
   function getGhostTasks(date: string) {
@@ -613,11 +645,11 @@ export default function App() {
     const color = background ? readableTextColor(background, defaultTaskColor, true) : taskColor(task);
     const style = { '--task-item-color': color, '--task-card-background': background } as CSSProperties;
     return (
-      <div className={`calendar-task ${task.completed ? 'is-completed' : ''} ${rolledOver ? 'is-rolled-over' : ''}`} data-color={task.color} data-background={state.settings.taskTextBackground} data-rollover={rolledOver ? 'true' : undefined} data-card-color={background ? 'true' : undefined} style={style} key={task.id} onContextMenu={event => openTaskMenu(task, event)}>
+      <div className={`calendar-task ${task.completed ? 'is-completed' : ''} ${rolledOver ? 'is-rolled-over' : ''}`} data-color={task.color} data-background={state.settings.taskTextBackground} data-rollover={rolledOver ? 'true' : undefined} data-card-color={background ? 'true' : undefined} style={style} key={task.id} data-list-task={task.id} onContextMenu={event => toggleTaskFromContext(task, event)}>
         {state.settings.showCompletedCheckbox && <input className="task-checkbox" type="checkbox" aria-label={`完成 ${task.title}`} checked={task.completed} onClick={(event) => event.stopPropagation()} onChange={() => toggleTaskCompletion(task)} />}
         <button className="calendar-task-label" type="button" title={`${task.time ? `${taskTimeLabel(task.time, task.endTime)} ` : ''}${task.title}${rolledOver ? ` · 已顺延 ${task.rolloverCount} 次` : ''}`} onClick={(event) => { event.stopPropagation(); goToTask(task); }}>
           {showNumber && state.settings.bulletStyle !== 'none' && <span className="task-number">{state.settings.bulletStyle === 'number' ? `${taskIndex + 1}.` : '•'}</span>}
-          <span className="task-title">{task.title}</span>
+          <span className="task-title"><span className="task-title-text">{task.title}</span></span>
           {state.settings.showReminderTime && task.time && <span className="task-time">{taskTimeLabel(task.time, task.endTime)}</span>}
           {task.completed && state.settings.showCompletedIcon && <Check className="task-complete-icon" size={11} />}
           {task.repeat !== 'none' && <span className="task-indicators"><Repeat2 className="task-repeat" size={10} /></span>}
@@ -823,6 +855,7 @@ export default function App() {
                     aria-selected={date === selectedDate}
                     aria-label={`${fullDateLabel(date)}，${rowCountForDay} 项日程`}
                     onClick={() => setSelectedDate(date)}
+                    onPointerLeave={event => releaseTaskOrder(event.currentTarget)}
                     onDoubleClick={(event) => addFromDoubleClick(event, date)}
                   >
                     <div className="day-cell-header">
@@ -858,7 +891,7 @@ export default function App() {
           view={calendarView} dates={scheduleDates} today={today} selectedDate={selectedDate} settings={state.settings}
           getDayTasks={getDayTasks} getGhostTasks={getGhostTasks}
           renderTask={(task, index) => renderTask(task, index, false)} renderGhostTask={renderGhostTask} taskColor={taskColor}
-          onSelectDate={setSelectedDate} onOpenTask={goToTask} onTaskMenu={openTaskMenu} onCreate={(date, initialTime) => {
+          onSelectDate={setSelectedDate} onOpenTask={goToTask} onTaskMenu={toggleTaskFromContext} onLeaveTaskCell={releaseTaskOrder} onCreate={(date, initialTime) => {
             setSelectedDate(date);
             setEditor({ date, initialTime });
           }}

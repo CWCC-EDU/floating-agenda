@@ -540,7 +540,7 @@ function resizeNoteWindow(id, height) {
   }
 }
 
-function showEditContextMenu(win, params, noteActions = []) {
+function showEditContextMenu(win, params, extraActions = [], actionsFirst = false) {
   const editFlags = params.editFlags || {};
   const template = [];
   if (params.isEditable) {
@@ -560,12 +560,13 @@ function showEditContextMenu(win, params, noteActions = []) {
       { type: 'separator' },
       { label: '全选', role: 'selectAll' },
     );
-  } else if (!noteActions.length) {
+  } else if (!extraActions.length) {
     return;
   }
-  if (noteActions.length) {
-    if (template.length) template.push({ type: 'separator' });
-    template.push(...noteActions);
+  if (extraActions.length) {
+    if (!template.length) template.push(...extraActions);
+    else if (actionsFirst) template.unshift(...extraActions, { type: 'separator' });
+    else template.push({ type: 'separator' }, ...extraActions);
   }
   focusWindow(win);
   const menu = Menu.buildFromTemplate(template);
@@ -932,14 +933,20 @@ ipcMain.on('note:change', (event, message) => {
     next.richText = typeof patch.richText === 'string' ? patch.richText : undefined;
   }
   if (typeof patch.completed === 'boolean') next.completed = patch.completed;
+  const removedImageIds = Array.isArray(patch.removedImageIds)
+    ? (note.images ?? []).filter(image => patch.removedImageIds.includes(image.id)).map(image => image.id) : [];
+  if (removedImageIds.length) next.images = note.images.filter(image => !removedImageIds.includes(image.id));
   const index = notesSync.notes.indexOf(note);
   if (index >= 0) notesSync.notes[index] = next;
-  if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send('notes:patch', { id, patch: { text: next.text, richText: next.richText, completed: next.completed } });
+  if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send('notes:patch', {
+    id, patch: { text: next.text, richText: next.richText, completed: next.completed, removedImageIds },
+  });
 });
 
-ipcMain.handle('note:insert-image', async (event, id) => {
+ipcMain.handle('note:insert-image', async (event, id, imageId) => {
   const win = noteWindows.get(id);
-  if (!win || win.isDestroyed() || win.webContents !== event.sender || !noteById(id)) return false;
+  if (!win || win.isDestroyed() || win.webContents !== event.sender || !noteById(id)
+    || typeof imageId !== 'string' || !/^[a-f0-9-]{36}$/i.test(imageId)) return false;
   const result = await dialog.showOpenDialog(win, {
     title: '插入便签图片', properties: ['openFile'],
     filters: [{ name: '图片', extensions: ['png', 'jpg', 'jpeg', 'webp'] }],
@@ -952,20 +959,20 @@ ipcMain.handle('note:insert-image', async (event, id) => {
   const { width, height } = picture.getSize();
   if (Math.max(width, height) > 1050) picture = picture.resize(width >= height ? { width: 1050 } : { height: 1050 });
   const image = 'data:image/png;base64,' + picture.toPNG().toString('base64');
-  await persistWorkspaceItem({ kind: 'image-note', id: randomUUID(), image, targetNoteId: id });
+  await persistWorkspaceItem({ kind: 'image-note', id: imageId, image, targetNoteId: id });
   return true;
 });
 
 ipcMain.on('task:menu', (event, payload) => {
   if (event.sender !== mainWindow?.webContents || !payload) return;
   const { id, x, y, editing, completed, hasSelection } = payload;
-  if (typeof id !== 'string' || !id || !Number.isFinite(x) || !Number.isFinite(y)) return;
+  if (editing !== true || typeof id !== 'string' || !id || !Number.isFinite(x) || !Number.isFinite(y)) return;
   showEditContextMenu(mainWindow, { x, y, isEditable: editing === true, editFlags: { canCut: hasSelection, canCopy: hasSelection } }, [{
     label: completed ? '取消完成' : '完成当前任务',
     click: () => {
       if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send('task:menu-complete', { id, editing: editing === true, completed: !completed });
     },
-  }]);
+  }], true);
 });
 
 ipcMain.on('note:format-menu', (event, payload) => {

@@ -1,8 +1,8 @@
 import { useCallback, useEffect, useRef, useState, type ClipboardEvent, type CSSProperties, type KeyboardEvent, type MouseEvent } from 'react';
 import { ArrowRight, Check, Plus, Repeat2, Trash2, X } from 'lucide-react';
 import { TASK_PALETTE } from '../lib/appearance';
-import { fullDateLabel } from '../lib/date';
-import { createTask, sortTasks } from '../lib/tasks';
+import { fullDateLabel, toDateKey } from '../lib/date';
+import { cancelTaskSeriesFrom, createTask, sortTasks } from '../lib/tasks';
 import { DEFAULT_RECURRENCE, normalizeRecurrence, REPEAT_OPTIONS } from '../lib/recurrence';
 import { clockTime, isTaskTimeRange, timeInMinutes } from '../lib/taskTime';
 import { RecurrenceFields } from './RecurrenceFields';
@@ -118,7 +118,7 @@ interface DayEditorDialogProps {
   settings: Settings;
   onAutoSave: (tasks: Task[], managed: ReadonlySet<string>) => void;
   onSave: (tasks: Task[], managed: ReadonlySet<string>) => void;
-  onCancelSeries: (taskId: string) => void;
+  onCancelSeries: (seriesId: string, cutoff: string) => void;
   onClose: () => void;
 }
 
@@ -444,6 +444,28 @@ export function DayEditorDialog({ date, tasks, initialTaskId, initialTime, setti
     commitLines(lines, lines.length - 1);
   }
 
+  function cancelSeries() {
+    const today = toDateKey();
+    const cutoff = date < today ? today : date;
+    if (!window.confirm('将移除自 ' + cutoff + ' 起的未完成重复条目，保留此前记录和已完成条目。确定取消重复？')) return;
+    const seriesId = selected.seriesId ?? selected.id;
+    const remaining = cancelTaskSeriesFrom(rows, seriesId, cutoff);
+    const next = remaining.length ? remaining : [createEmptyTask(date)];
+    const lines = next.map(row => row.title);
+    const index = Math.min(selectedIndex, next.length - 1);
+    rowsRef.current = next;
+    setRows(next);
+    setText(lines.join('\n'));
+    setActiveLine(index);
+    const editor = editorRef.current;
+    if (editor) {
+      renderLines(editor, lines);
+      editor.focus();
+      focusLineEnd(editor, index);
+    } else focusRow(index);
+    onCancelSeries(seriesId, cutoff);
+  }
+
   function removeSelectedLine() {
     if (multiRow) {
       removeRow(selectedIndex);
@@ -606,9 +628,7 @@ export function DayEditorDialog({ date, tasks, initialTaskId, initialTime, setti
                       }
                       setShowRepeat(false);
                       if (option.value === 'none' && selected?.repeat !== 'none') {
-                        if (!window.confirm('取消重复会删除这一系列在所有日期上的日程，确定吗？')) return;
-                        onCancelSeries(selected.id);
-                        removeSelectedLine();
+                        cancelSeries();
                         return;
                       }
                       updateSelected({ repeat: option.value, recurrence: undefined, recurrenceStart: undefined, recurrenceExcludedDates: undefined });

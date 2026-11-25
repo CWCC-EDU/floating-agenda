@@ -1,6 +1,6 @@
 {
   "name": "floating-agenda",
-  "version": "1.5.7",
+  "version": "1.5.8",
   "private": true,
   "description": "A transparent desktop agenda with automatic task rollover.",
   "main": "electron/main.cjs",

@@ -10,7 +10,7 @@ contextBridge.exposeInMainWorld('desktop', {
   exportDrawing: (bytes) => ipcRenderer.invoke('drawing:export', bytes),
   saveDrawingNote: (id, bytes, targetNoteId) => ipcRenderer.invoke('drawing:note', id, bytes, targetNoteId),
   listDrawingNotes: () => ipcRenderer.invoke('drawing:notes'),
-  insertNoteImage: (id) => ipcRenderer.invoke('note:insert-image', id),
+  insertNoteImage: (id, imageId) => ipcRenderer.invoke('note:insert-image', id, imageId),
   showTaskMenu: (request) => ipcRenderer.send('task:menu', request),
   onTaskMenuComplete: (callback) => {
     const listener = (_event, request) => callback(request);
