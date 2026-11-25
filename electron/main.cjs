@@ -25,7 +25,8 @@ let latestSettings = {
   showHideShortcut: 'Control+Shift+Space',
   quickCaptureShortcut: '',
   toggleContentShortcut: '',
-  toggleNotesShortcut: '',
+  toggleNotesShortcut: 'Control+Alt+B',
+  showNotesOnTaskbar: true,
   completeTaskShortcut: '',
 };
 let adjustment = null;
@@ -36,13 +37,12 @@ let displayChangeTimer = null;
 let calendarDisplayPreference = 'primary';
 let windowBoundsWrites = Promise.resolve();
 let calendarRequested = false;
-let focusedNote = null;
 let noteToFocus = null;
-let contextMenuWindow = null;
 let notesSync = { notes: [], appearance: null };
 const noteWindows = new Map();
 const closingNoteIds = new Set();
 let noteBoundsCache = null;
+let noteBoundsWrites = Promise.resolve();
 let noteDrag = null;
 let notesSuppressed = false;
 let workspaceReady = false;
@@ -119,7 +119,9 @@ function calendarDisplayStatus() {
 
 function pushCalendarDisplays() {
   if (!mainWindow || mainWindow.isDestroyed() || mainWindow.webContents.isLoading()) return;
-  mainWindow.webContents.send('calendar:displays-changed', calendarDisplayStatus());
+  const status = calendarDisplayStatus();
+  mainWindow.webContents.send('calendar:displays-changed', status);
+  utilityWindows.get('settings')?.webContents.send('calendar:displays-changed', status);
 }
 
 function recoverCalendarBounds(targetWorkArea) {
@@ -168,15 +170,8 @@ function updateDesktopOrder() {
   if (process.platform !== 'win32') return;
 
   const calendar = calendarRequested && mainWindow && !mainWindow.isDestroyed() ? mainWindow : null;
-  const windows = [...noteWindows.values()].filter((win) =>
-    !win.isDestroyed() && win.isVisible() && !win.isMinimized());
-  const topNote = contextMenuWindow === mainWindow ? focusedNote : (contextMenuWindow ?? focusedNote);
-  if (topNote && windows.includes(topNote)) {
-    windows.splice(windows.indexOf(topNote), 1);
-    windows.unshift(topNote);
-  }
-  if (calendar) windows.push(calendar);
-  maintainDesktopOrder(calendar, latestSettings.desktopIconLayer === 'above', windows);
+  // Keep the calendar on the desktop. Sticky notes use the normal Windows stacking order.
+  maintainDesktopOrder(calendar, latestSettings.desktopIconLayer === 'above', calendar ? [calendar] : []);
 }
 
 function focusWindow(win = mainWindow) {
@@ -273,7 +268,7 @@ function readNoteBoundsCache() {
       const height = Number.isFinite(value.height)
         ? Math.min(NOTES_MAX_HEIGHT, Math.max(NOTES_MIN_HEIGHT, Math.round(value.height)))
         : 220;
-      noteBoundsCache[id] = { x: Math.round(value.x), y: Math.round(value.y), height };
+      noteBoundsCache[id] = { x: Math.round(value.x), y: Math.round(value.y), height, pinned: value.pinned === true };
     });
   } catch {
     // Missing or legacy bounds fall back to default placement.
@@ -283,15 +278,18 @@ function readNoteBoundsCache() {
 
 function persistNoteBounds() {
   if (!noteBoundsCache) return;
-  fs.mkdir(path.dirname(notesBoundsPath()), { recursive: true })
-    .then(() => fs.writeFile(notesBoundsPath(), JSON.stringify({ notes: noteBoundsCache }), 'utf8'))
-    .catch(() => {});
+  const target = notesBoundsPath();
+  const snapshot = JSON.stringify({ notes: noteBoundsCache });
+  noteBoundsWrites = noteBoundsWrites.then(async () => {
+    await fs.mkdir(path.dirname(target), { recursive: true });
+    await fs.writeFile(target, snapshot, 'utf8');
+  }).catch(error => console.warn('Unable to save note window preferences:', error));
 }
 
 function saveNoteBounds(id, win = noteWindows.get(id)) {
   if (!id || !win || win.isDestroyed()) return;
-  const { x, y, height } = win.getBounds();
-  readNoteBoundsCache()[id] = { x: Math.round(x), y: Math.round(y), height: Math.round(height) };
+  const { x, y, height } = win.getNormalBounds();
+  readNoteBoundsCache()[id] = { x: Math.round(x), y: Math.round(y), height: Math.round(height), pinned: win.isAlwaysOnTop() };
   persistNoteBounds();
 }
 
@@ -328,7 +326,9 @@ function pushNoteState(id) {
   const win = noteWindows.get(id);
   const note = noteById(id);
   if (!win || win.isDestroyed() || win.webContents.isDestroyed() || win.webContents.isLoading() || !note || !notesSync.appearance) return;
-  win.webContents.send('note:state', { note, appearance: notesSync.appearance });
+  const title = note.text.split(/\r?\n/).find(line => line.trim())?.trim().slice(0, 48) || (note.images?.length ? '图片便签' : '便签');
+  if (win.getTitle() !== title) win.setTitle(title);
+  win.webContents.send('note:state', { note, appearance: notesSync.appearance, pinned: win.isAlwaysOnTop() });
 }
 
 function pushAllNoteStates() {
@@ -342,12 +342,13 @@ function showNoteWindow(id) {
   if (win.webContents.isLoading()) return;
   if (noteToFocus === id) {
     noteToFocus = null;
+    if (win.isMinimized()) win.restore();
     win.show();
+    win.moveTop();
     focusWindow(win);
   } else if (!win.isVisible()) {
     win.showInactive();
   }
-  updateDesktopOrder();
 }
 
 function showOpenNoteWindows() {
@@ -390,7 +391,6 @@ function ensureNoteWindow(id) {
     ? { x: saved.x, y: saved.y, width: NOTES_WIDTH, height: saved.height }
     : defaultNoteBounds());
   const win = new BrowserWindow({
-    parent: mainWindow ?? undefined,
     width: bounds.width,
     height: bounds.height,
     x: bounds.x,
@@ -399,11 +399,11 @@ function ensureNoteWindow(id) {
     frame: false,
     icon: iconPath(),
     backgroundColor: '#00000000',
-    alwaysOnTop: false,
-    skipTaskbar: true,
+    alwaysOnTop: saved?.pinned === true,
+    skipTaskbar: !latestSettings.showNotesOnTaskbar,
     hasShadow: false,
     resizable: false,
-    minimizable: false,
+    minimizable: true,
     maximizable: false,
     fullscreenable: false,
     show: false,
@@ -435,14 +435,10 @@ function ensureNoteWindow(id) {
     clearTimeout(saveMovedPosition);
     saveMovedPosition = setTimeout(() => saveNoteBounds(id, win), 180);
   });
-  win.on('focus', () => {
-    focusedNote = win;
-    updateDesktopOrder();
-  });
+  win.on('minimize', sendNotePreviews);
+  win.on('restore', sendNotePreviews);
   win.on('blur', () => {
     if (noteDrag?.id === id) endNoteDrag();
-    if (focusedNote === win) focusedNote = null;
-    updateDesktopOrder();
   });
   win.on('close', (event) => {
     if (isQuitting || closingNoteIds.has(id)) return;
@@ -456,8 +452,6 @@ function ensureNoteWindow(id) {
     clearTimeout(saveMovedPosition);
     noteWindows.delete(id);
     if (noteDrag?.id === id) endNoteDrag();
-    if (focusedNote === win) focusedNote = null;
-    updateDesktopOrder();
   });
   return win;
 }
@@ -570,11 +564,6 @@ function showEditContextMenu(win, params, extraActions = [], actionsFirst = fals
   }
   focusWindow(win);
   const menu = Menu.buildFromTemplate(template);
-  contextMenuWindow = win;
-  menu.once('menu-will-close', () => {
-    contextMenuWindow = null;
-    updateDesktopOrder();
-  });
   menu.popup({ window: win, x: Math.round(params.x), y: Math.round(params.y) });
 }
 
@@ -584,7 +573,7 @@ function registerShortcuts() {
     [latestSettings.showHideShortcut, toggleWindow],
     [latestSettings.quickCaptureShortcut, () => utilityWindows.open('quick')],
     [latestSettings.toggleContentShortcut, () => sendMenuAction('toggle-content')],
-    [latestSettings.toggleNotesShortcut, () => sendMenuAction('toggle-notes')],
+    [latestSettings.toggleNotesShortcut, revealNotes],
     [latestSettings.completeTaskShortcut, () => sendMenuAction('complete-selected')],
   ];
   const registered = new Set();
@@ -609,6 +598,7 @@ async function applyIntegrationSettings() {
     latestSettings.toggleContentShortcut,
     latestSettings.toggleNotesShortcut,
     latestSettings.completeTaskShortcut,
+    latestSettings.showNotesOnTaskbar,
   ]);
   if (signature === integrationSignature) return;
   integrationSignature = signature;
@@ -624,6 +614,7 @@ async function applyIntegrationSettings() {
     console.warn('Unable to apply proxy settings:', error);
   }
   registerShortcuts();
+  refreshNoteTaskbar();
 }
 
 function compareVersions(left, right) {
@@ -671,6 +662,17 @@ async function repairDesktopFromSettings() {
     unavailable: '暂时无法修复桌面输入。',
   };
   return messages[status] ?? messages.unavailable;
+}
+
+function refreshNoteTaskbar() {
+  const enabled = Boolean(latestSettings.showNotesOnTaskbar);
+  const list = utilityWindows.get('notes');
+  if (list) list.setSkipTaskbar(!enabled);
+  noteWindows.forEach(win => { if (!win.isDestroyed()) win.setSkipTaskbar(!enabled); });
+}
+
+function revealNotes() {
+  utilityWindows.open('notes', { skipTaskbar: !latestSettings.showNotesOnTaskbar });
 }
 
 function updateTrayMenu() {
@@ -797,6 +799,7 @@ if (!hasSingleInstanceLock) {
   app.whenReady().then(async () => {
     nutstore.init({ userDataPath: app.getPath('userData') });
     await restoreSavedSettings();
+    if (process.platform === 'win32') app.setAppUserModelId('com.floatingagenda.desktop');
     createWindow();
     createTray();
     screen.on('display-added', onDisplayLayoutChanged);
@@ -832,7 +835,7 @@ const themeFile = () => path.join(app.getPath('userData'), 'theme-image.jpg');
 const themeDataUrl = (bytes) => 'data:image/jpeg;base64,' + bytes.toString('base64');
 
 ipcMain.handle('theme:load', async (event) => {
-  if (event.sender !== mainWindow?.webContents) return null;
+  if (event.sender !== mainWindow?.webContents && event.sender !== utilityWindows.get('settings')?.webContents) return null;
   try {
     const bytes = await fs.readFile(themeFile());
     return bytes.length <= 5 * 1024 * 1024 ? themeDataUrl(bytes) : null;
@@ -843,7 +846,7 @@ ipcMain.handle('theme:load', async (event) => {
 });
 
 ipcMain.handle('theme:save', async (event, bytes) => {
-  if (event.sender !== mainWindow?.webContents || !(bytes instanceof Uint8Array)
+  if ((event.sender !== mainWindow?.webContents && event.sender !== utilityWindows.get('settings')?.webContents) || !(bytes instanceof Uint8Array)
       || bytes.length < 4 || bytes.length > 5 * 1024 * 1024 || bytes[0] !== 255 || bytes[1] !== 216) {
     throw new Error('无法保存主题图片');
   }
@@ -911,6 +914,7 @@ ipcMain.on('notes:sync', (_event, payload) => {
     appearance: payload.appearance && typeof payload.appearance === 'object' ? payload.appearance : null,
   };
   syncNoteWindows();
+  sendNotePreviews();
 });
 
 ipcMain.handle('note:ready', (event, id) => {
@@ -918,7 +922,15 @@ ipcMain.handle('note:ready', (event, id) => {
   const note = noteById(id);
   if (!win || win.isDestroyed() || win.webContents !== event.sender || !note || !notesSync.appearance) return null;
   showNoteWindow(id);
-  return { note, appearance: notesSync.appearance };
+  return { note, appearance: notesSync.appearance, pinned: win.isAlwaysOnTop() };
+});
+
+ipcMain.on('note:toggle-pin', (event, id) => {
+  const win = noteWindows.get(id);
+  if (!win || win.isDestroyed() || win.webContents !== event.sender) return;
+  win.setAlwaysOnTop(!win.isAlwaysOnTop());
+  saveNoteBounds(id, win);
+  pushNoteState(id);
 });
 
 ipcMain.on('note:change', (event, message) => {
@@ -987,9 +999,15 @@ ipcMain.on('note:format-menu', (event, payload) => {
   ]);
 });
 
-ipcMain.on('note:close', (_event, id) => {
+ipcMain.on('note:close', (event, id) => {
   const note = noteById(id);
-  if (!note) return;
+  const win = noteWindows.get(id);
+  if (!note || !win || win.isDestroyed() || event.sender !== win.webContents) return;
+  if (latestSettings.showNotesOnTaskbar) {
+    saveNoteBounds(id, win);
+    win.minimize();
+    return;
+  }
   note.open = false;
   destroyNoteWindow(id);
   if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send('notes:open-changed', id, false);
@@ -1013,6 +1031,77 @@ ipcMain.on('note:focus', (_event, id) => {
   noteToFocus = id;
   notesSuppressed = false;
   showNoteWindow(id);
+});
+
+function notePreviews() {
+  return notesSync.notes.map(note => ({ id: note.id, text: note.text.slice(0, 600), image: note.images?.[0]?.src,
+    createdAt: note.createdAt, open: note.open === true && !noteWindows.get(note.id)?.isMinimized() }));
+}
+
+function sendNotePreviews() {
+  const list = utilityWindows.get('notes');
+  if (list && !list.isDestroyed() && !list.webContents.isLoading() && !list.isMinimized()) list.webContents.send('note-list:changed', notePreviews());
+}
+
+ipcMain.on('note-list:open', event => {
+  if (event.sender === mainWindow?.webContents || [...noteWindows.values()].some(win => win.webContents === event.sender)) revealNotes();
+});
+ipcMain.handle('note-list:get', event => event.sender === utilityWindows.get('notes')?.webContents ? notePreviews() : []);
+ipcMain.on('note-list:choose', (event, id) => {
+  if (event.sender !== utilityWindows.get('notes')?.webContents) return;
+  const note = noteById(id);
+  if (!note) return;
+  note.open = true;
+  notesSuppressed = false;
+  noteToFocus = id;
+  ensureNoteWindow(id);
+  showNoteWindow(id);
+  if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send('notes:open-changed', id, true);
+});
+
+let settingsSnapshot = null;
+let settingsRequestId = 0;
+const pendingSettings = new Map();
+ipcMain.on('settings:open', (event, category) => {
+  if (event.sender !== mainWindow?.webContents) return;
+  if (settingsSnapshot) settingsSnapshot = { ...settingsSnapshot, category };
+  const existing = utilityWindows.get('settings');
+  const win = utilityWindows.open('settings');
+  if (!existing) win.once('closed', () => {
+    if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send('settings:closed');
+  });
+});
+ipcMain.on('settings:publish', (event, snapshot) => {
+  if (event.sender !== mainWindow?.webContents) return;
+  settingsSnapshot = snapshot;
+  const win = utilityWindows.get('settings');
+  if (win && !win.isDestroyed() && !win.webContents.isLoading()) win.webContents.send('settings:changed', snapshot);
+});
+ipcMain.handle('settings:get', event => event.sender === utilityWindows.get('settings')?.webContents ? settingsSnapshot : null);
+ipcMain.on('settings:close', event => {
+  const win = utilityWindows.get('settings');
+  if (event.sender === win?.webContents) win.close();
+});
+ipcMain.on('settings:command', (event, command) => {
+  if (event.sender !== utilityWindows.get('settings')?.webContents || !mainWindow || mainWindow.isDestroyed() || command?.type === 'apply-sync') return;
+  mainWindow.webContents.send('settings:command', command);
+});
+ipcMain.handle('settings:apply-sync', (event, result, expected) => {
+  if (event.sender !== utilityWindows.get('settings')?.webContents || !mainWindow || mainWindow.isDestroyed()) throw new Error('无法访问日历');
+  const id = ++settingsRequestId;
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(() => { pendingSettings.delete(id); reject(new Error('同步超时')); }, 15000);
+    pendingSettings.set(id, response => {
+      clearTimeout(timer);
+      if (response) resolve(response); else reject(new Error('同步未能完成'));
+    });
+    mainWindow.webContents.send('settings:command', { type: 'apply-sync', requestId: id, result, expected });
+  });
+});
+ipcMain.on('settings:finish-sync', (event, id, result) => {
+  if (event.sender !== mainWindow?.webContents) return;
+  pendingSettings.get(id)?.(result);
+  pendingSettings.delete(id);
 });
 
 ipcMain.on('note:drag-start', (event, id, x, y) => {
@@ -1053,7 +1142,7 @@ ipcMain.handle('window:adjust-mode', () => {
 });
 
 ipcMain.handle('desktop:repair-input', (event) => {
-  if (event.sender === mainWindow?.webContents && process.platform === 'win32') return repairDesktopFromSettings();
+  if ((event.sender === mainWindow?.webContents || event.sender === utilityWindows.get('settings')?.webContents) && process.platform === 'win32') return repairDesktopFromSettings();
   return '暂时无法修复桌面输入。';
 });
 

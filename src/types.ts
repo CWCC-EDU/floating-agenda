@@ -31,10 +31,20 @@ export type ImageSkin = 'none' | 'coast' | 'earth' | 'local';
 export type SkinPosition = 'center' | 'left' | 'right' | 'top' | 'bottom';
 export type DesktopIconLayer = 'above' | 'below';
 
+export type TaskTextStyle = 'bold-title' | 'italic-notes' | 'normal-notes';
+export type TaskExtrasMode = 'hide' | 'notes' | 'subtasks' | 'all';
+
+export interface TaskSubtask {
+  id: string;
+  title: string;
+  completed: boolean;
+}
+
 export interface Task {
   id: string;
   title: string;
   notes: string;
+  subtasks?: TaskSubtask[];
   date: string;
   time: string;
   endTime?: string;
@@ -106,6 +116,7 @@ export interface Settings {
   bulletStyle: BulletStyle;
   rowGap: number;
   completedToBottom: boolean;
+  subtasksCompletedToBottom: boolean;
   rolloverHighlightEnabled: boolean;
   rolloverHighlightColor: string;
   rolloverGhostEnabled: boolean;
@@ -136,6 +147,13 @@ export interface Settings {
   editorFontSize: number;
   editorTextColor: string;
   editorInputStyle: EditorInputStyle;
+  editorEnterSaves: boolean;
+  showTaskDetails: boolean;
+  taskTextStyle: TaskTextStyle;
+  monthTaskExtras: TaskExtrasMode;
+  weekTaskExtras: TaskExtrasMode;
+  dayTaskExtras: TaskExtrasMode;
+  pinnedToolbarActions: import('./lib/toolbarActions').ToolbarAction[];
   desktopIconLayer: DesktopIconLayer;
   restDayBackgroundColor: string;
   titleButtonColor: string;
@@ -144,6 +162,7 @@ export interface Settings {
   showRestDays: boolean;
   restDays: number[];
   showNotes: boolean;
+  showNotesOnTaskbar: boolean;
   noteBulletStyle: BulletStyle;
   noteOpacity: number;
   noteRowGap: number;
@@ -232,7 +251,16 @@ export type NotesAppearance = Pick<
 export type NotePatch = Partial<Pick<StickyNote, 'text' | 'richText' | 'completed'>> & { removedImageIds?: string[] };
 export type NoteFormat = { type: 'checkbox' | 'strike' } | { type: 'color'; color: string };
 
+export type SettingsCategory = 'calendar' | 'cells' | 'appearance' | 'notes' | 'sync' | 'advanced' | 'about';
+export type SettingsWindowState = { state: AppState; syncStatus: NutstoreSyncStatus | null; syncConflict: NutstoreRemoteSummary | null; category: SettingsCategory };
+export type SettingsCommand = { type: 'settings'; patch: Partial<Settings> } | { type: 'skin'; image: string }
+  | { type: 'create-note' } | { type: 'open-note' | 'delete-note'; id: string }
+  | { type: 'sync-status'; status: NutstoreSyncStatus } | { type: 'sync-conflict'; conflict: NutstoreRemoteSummary | null }
+  | { type: 'apply-sync'; requestId: number; result: NutstoreSyncResult; expected: AppState };
+export type NotePreview = { id: string; text: string; image?: string; createdAt: string; open: boolean };
+
 export interface NoteStatePayload {
+  pinned: boolean;
   note: StickyNote;
   appearance: NotesAppearance;
 }
@@ -246,6 +274,7 @@ export type DesktopMenuAction =
   | 'today'
   | 'toggle-content'
   | 'toggle-notes'
+  | 'show-notes'
   | 'note:new'
   | `note:toggle:${string}`
   | 'complete-selected'
@@ -306,11 +335,26 @@ export interface DesktopBridge {
   showNoteFormatMenu: (id: string, x: number, y: number, hasSelection: boolean) => void;
   onNoteFormat: (callback: (format: NoteFormat) => void) => () => void;
   noteReady: (id: string) => Promise<NoteStatePayload | null>;
+  toggleNotePin: (id: string) => void;
   sendNoteChange: (id: string, patch: NotePatch) => void;
   closeNote: (id: string) => void;
   deleteNote: (id: string) => void;
   newNote: () => void;
   focusNote: (id: string) => void;
+  openNoteList: () => void;
+  getNotePreviews: () => Promise<NotePreview[]>;
+  onNotePreviews: (callback: (items: NotePreview[]) => void) => () => void;
+  openNoteFromList: (id: string) => void;
+  openSettingsWindow: (category: SettingsCategory) => void;
+  publishSettingsWindow: (snapshot: SettingsWindowState) => void;
+  getSettingsWindow: () => Promise<SettingsWindowState | null>;
+  onSettingsWindow: (callback: (snapshot: SettingsWindowState) => void) => () => void;
+  onSettingsClosed: (callback: () => void) => () => void;
+  closeSettingsWindow: () => void;
+  settingsCommand: (command: Exclude<SettingsCommand, { type: 'apply-sync' }>) => void;
+  onSettingsCommand: (callback: (command: SettingsCommand) => void) => () => void;
+  applySettingsSync: (result: NutstoreSyncResult, expected: AppState) => Promise<NutstoreSyncResult>;
+  finishSettingsSync: (id: number, result: NutstoreSyncResult | null) => void;
   onNoteState: (callback: (payload: NoteStatePayload) => void) => () => void;
   onNotesPatch: (callback: (payload: { id: string; patch: NotePatch }) => void) => () => void;
   onNotesOpenChanged: (callback: (id: string, open: boolean) => void) => () => void;

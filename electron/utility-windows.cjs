@@ -4,6 +4,8 @@ const path = require('node:path');
 
 const WINDOW_OPTIONS = {
   quick: { title: '快速记一条', width: 478, height: 620, resizable: false, maximizable: false },
+  settings: { title: '浮屿设置', width: 790, height: 690, minWidth: 485, minHeight: 365 },
+  notes: { title: '浮屿便签列表', width: 390, height: 570, minWidth: 295, minHeight: 280 },
   drawing: { title: '浮屿小画板', width: 900, height: 650, minWidth: 480, minHeight: 340 },
 };
 const PNG_HEADER = Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]);
@@ -25,13 +27,13 @@ function validRequestId(id) {
 function createUtilityWindows(iconPath, persistItem, listNotes) {
   const windows = new Map();
 
-  function open(view) {
+  function open(view, { skipTaskbar = false } = {}) {
     const existing = windows.get(view);
     if (existing && !existing.isDestroyed()) {
       if (existing.isMinimized()) existing.restore();
       existing.show();
       existing.focus();
-      return;
+      return existing;
     }
     const options = WINDOW_OPTIONS[view];
     const area = screen.getDisplayNearestPoint(screen.getCursorScreenPoint()).workArea;
@@ -44,6 +46,7 @@ function createUtilityWindows(iconPath, persistItem, listNotes) {
       x: area.x + Math.floor((area.width - width) / 2),
       y: area.y + Math.floor((area.height - height) / 2),
       show: false,
+      skipTaskbar,
       autoHideMenuBar: true,
       icon: iconPath(),
       backgroundColor: '#f4f6f5',
@@ -66,6 +69,7 @@ function createUtilityWindows(iconPath, persistItem, listNotes) {
     } else {
       void win.loadFile(path.join(__dirname, '..', 'dist', 'index.html'), { query: { view } }).catch(closeOnLoadFailure);
     }
+    return win;
   }
 
   function verifySender(event, view) {
@@ -109,7 +113,7 @@ function createUtilityWindows(iconPath, persistItem, listNotes) {
     await persistItem({ kind: 'image-note', id, image, targetNoteId });
   });
 
-  return { open };
+  return { open, get: view => windows.get(view) };
 }
 
 module.exports = { createUtilityWindows };

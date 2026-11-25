@@ -1,11 +1,12 @@
+import { TOOLBAR_ACTIONS } from '../lib/toolbarActions';
 import { useEffect, useState, type CSSProperties, type KeyboardEvent, type ReactNode } from 'react';
 import { CalendarDays, ChevronRight, Cloud, Info, Keyboard, LayoutGrid, Monitor, RotateCcw, SlidersHorizontal, StickyNote as StickyNoteIcon, Type, X } from 'lucide-react';
 import { DEFAULT_SETTINGS } from '../lib/storage';
 import { importLocalSkin, skinImage, SKIN_OPTIONS } from '../lib/skins';
 import { SyncSettings } from './SyncSettings';
-import type { AppState, NutstoreRemoteSummary, NutstoreSyncResult, NutstoreSyncStatus, BulletStyle, CalendarDisplayStatus, CalendarLayout, DesktopIconLayer, EditorInputStyle, FontFamily, Settings, SkinPosition, SoundEffect, StickyNote, TextBackground, UpdateCheckResult } from '../types';
+import type { SettingsCategory, TaskExtrasMode, TaskTextStyle, AppState, NutstoreRemoteSummary, NutstoreSyncResult, NutstoreSyncStatus, BulletStyle, CalendarDisplayStatus, CalendarLayout, DesktopIconLayer, EditorInputStyle, FontFamily, Settings, SkinPosition, SoundEffect, StickyNote, TextBackground, UpdateCheckResult } from '../types';
 
-type Category = 'calendar' | 'cells' | 'appearance' | 'notes' | 'sync' | 'advanced' | 'about';
+type Category = SettingsCategory;
 type ShortcutKey = 'showHideShortcut' | 'quickCaptureShortcut' | 'toggleContentShortcut' | 'toggleNotesShortcut' | 'completeTaskShortcut';
 
 interface SettingsDialogProps {
@@ -37,6 +38,17 @@ const CATEGORIES = [
   { id: 'advanced', label: '高级', icon: SlidersHorizontal },
   { id: 'about', label: '关于', icon: Info },
 ] as const;
+
+const TASK_TEXT_STYLES: { value: TaskTextStyle; label: string }[] = [
+  { value: 'bold-title', label: '主任务加粗' },
+  { value: 'italic-notes', label: '备注斜体' },
+  { value: 'normal-notes', label: '备注正常字体' },
+];
+
+const TASK_EXTRAS_OPTIONS: { value: TaskExtrasMode; label: string }[] = [
+  { value: 'hide', label: '隐藏' }, { value: 'notes', label: '仅备注' },
+  { value: 'subtasks', label: '仅子任务' }, { value: 'all', label: '备注与子任务' },
+];
 
 const LAYOUTS: { value: CalendarLayout; label: string }[] = [
   { value: 'floating-month', label: '浮动月份' },
@@ -292,7 +304,23 @@ export function SettingsDialog({ initialCategory, localSkin, onLocalSkinChange, 
                   <ToggleRow title="毛玻璃特效" checked={settings.blurEnabled} onChange={(blurEnabled) => update({ blurEnabled })} />
                   <ToggleRow title="显示周数" checked={settings.showWeekNumbers} onChange={(showWeekNumbers) => update({ showWeekNumbers })} />
                   <ToggleRow title="显示阴影" checked={settings.showShadow} onChange={(showShadow) => update({ showShadow })} />
+                  <SelectRow title="日程详情内 Enter 键" value={settings.editorEnterSaves ? 'save' : 'next'} options={[{ value: 'save', label: '保存并关闭（Shift+Enter 新增）' }, { value: 'next', label: '新增下一条' }]} onChange={value => update({ editorEnterSaves: value === 'save' })} />
+                  <ToggleRow title="显示任务详情按钮" description="在日程详情每行右侧显示子任务与备注的入口" checked={settings.showTaskDetails} onChange={(showTaskDetails) => update({ showTaskDetails })} />
                   <ToggleRow title="显示标题栏" description="隐藏后仍可通过 Windows 托盘打开设置" checked={settings.showTitleBar} onChange={(showTitleBar) => update({ showTitleBar })} />
+                </Section>
+                <Section title="备注与子任务">
+                  <ToggleRow title="已完成子任务排到末尾" description="结束子任务编辑或移开日历格后重新排序" checked={settings.subtasksCompletedToBottom} onChange={subtasksCompletedToBottom => update({ subtasksCompletedToBottom })} />
+                  <SelectRow title="任务文字样式" value={settings.taskTextStyle} options={TASK_TEXT_STYLES} onChange={taskTextStyle => update({ taskTextStyle })} />
+                  {([["日视图", "dayTaskExtras"], ["周视图", "weekTaskExtras"], ["月视图", "monthTaskExtras"]] as const).map(([title, key]) =>
+                    <SelectRow key={key} title={title + "补充内容"} value={settings[key]} options={TASK_EXTRAS_OPTIONS} onChange={value => update({ [key]: value })} />)}
+                </Section>
+                <Section title="顶栏快捷按钮">
+                  <div className="toolbar-action-settings">{TOOLBAR_ACTIONS.map(({ id, label }) => (
+                    <label key={id}><input type="checkbox" checked={settings.pinnedToolbarActions.includes(id)} onChange={event => {
+                      const pinned = settings.pinnedToolbarActions;
+                      update({ pinnedToolbarActions: event.target.checked ? [...pinned, id] : pinned.filter(item => item !== id) });
+                    }} />{label}</label>
+                  ))}</div>
                 </Section>
                 <Section title="节日">
                   <ToggleRow title="显示法定休息日" checked={settings.showLegalHolidays} onChange={(showLegalHolidays) => update({ showLegalHolidays })} />
@@ -455,7 +483,8 @@ export function SettingsDialog({ initialCategory, localSkin, onLocalSkinChange, 
                   <ShortcutRow title="快速记一条" setting="quickCaptureShortcut" value={settings.quickCaptureShortcut} disabled={!isElectron} onChange={updateShortcut} />
                   <ShortcutRow title="显示 / 隐藏日历" setting="showHideShortcut" value={settings.showHideShortcut} disabled={!isElectron} onChange={updateShortcut} />
                   <ShortcutRow title="显示 / 隐藏日历内容" setting="toggleContentShortcut" value={settings.toggleContentShortcut} disabled={!isElectron} onChange={updateShortcut} />
-                  <ShortcutRow title="显示 / 隐藏便签" setting="toggleNotesShortcut" value={settings.toggleNotesShortcut} disabled={!isElectron} onChange={updateShortcut} />
+                  <ToggleRow title="在 Windows 任务栏显示便签" description="在便签窗口打开时显示，可在任务栏切换窗口" checked={settings.showNotesOnTaskbar} disabled={!isElectron} onChange={showNotesOnTaskbar => update({ showNotesOnTaskbar })} />
+                  <ShortcutRow title="呼出便签" setting="toggleNotesShortcut" value={settings.toggleNotesShortcut} disabled={!isElectron} onChange={updateShortcut} />
                   <ShortcutRow title="完成选中日期首项任务" setting="completeTaskShortcut" value={settings.completeTaskShortcut} disabled={!isElectron} onChange={updateShortcut} />
                 </Section>
                 <Section title="软件设置">

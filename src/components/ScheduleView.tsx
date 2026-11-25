@@ -27,6 +27,7 @@ interface ScheduleViewProps {
   onOpenTask(task: Task, displayedDate: string): void;
   onTaskMenu(task: Task, event: MouseEvent<HTMLElement>): void;
   onLeaveTaskCell(cell: HTMLElement): void;
+  renderTaskExtras(task: Task): ReactNode;
   onCreate(date: string, time?: TaskTime): void;
 }
 
@@ -108,7 +109,7 @@ function ScheduleTaskCell({ date, kind, preferredFontSize, minFontSize, rest, on
 
 export function ScheduleView({
   view, dates, today, selectedDate, settings,
-  getDayTasks, getGhostTasks, renderTask, renderGhostTask, taskColor, onSelectDate, onOpenTask, onTaskMenu, onLeaveTaskCell, onCreate,
+  getDayTasks, getGhostTasks, renderTask, renderGhostTask, taskColor, onSelectDate, onOpenTask, onTaskMenu, onLeaveTaskCell, renderTaskExtras, onCreate,
 }: ScheduleViewProps) {
   const timeline = view === 'day' ? settings.showDayTimeAxis : settings.showWeekTimeAxis;
   const baseFontSize = view === 'day' ? settings.dayTaskBaseFontSize : settings.weekTaskBaseFontSize;
@@ -216,7 +217,7 @@ export function ScheduleView({
           {HOURS.map(hour => <span key={hour}>{hour}</span>)}
         </div>
         {days.map(({ date, tasks, rest }) => (
-          <div key={date} className={'schedule-hour-column' + (rest ? ' is-rest-day' : '')} data-date={date}
+          <div key={date} className={'schedule-hour-column' + (rest ? ' is-rest-day' : '')} data-date={date} onPointerLeave={event => onLeaveTaskCell(event.currentTarget)}
             onDoubleClick={event => createAt(event, date)} onPointerDown={beginRange}
             onPointerMove={event => updateRange(event, date)} onPointerUp={event => finishRange(event, date)}
             onPointerCancel={event => finishRange(event, date)} onLostPointerCapture={event => finishRange(event, date)}>
@@ -225,7 +226,7 @@ export function ScheduleView({
               return (
                 <button key={event.task.id} type="button"
                   className={'schedule-event' + (event.task.completed ? ' is-completed' : '') + (event.from === event.to ? ' is-point' : '')}
-                  data-task-id={event.task.id} data-continuing={event.continuing || undefined} data-card-color={background ? 'true' : undefined}
+                  data-task-id={event.task.id} data-late={event.start >= 1160 || undefined} data-continuing={event.continuing || undefined} data-card-color={background ? 'true' : undefined}
                   style={{
                     '--event-top': percentage(event.start), '--event-height': percentage(event.end - event.start),
                     '--event-lane': event.lane, '--event-lanes': event.lanes, '--event-color': taskColor(event.task),
@@ -236,6 +237,7 @@ export function ScheduleView({
                   onContextMenu={mouseEvent => onTaskMenu(event.task, mouseEvent)}
                   onClick={() => onOpenTask(event.task, date)}>
                   <span className="schedule-event-title">{event.task.completed && settings.showCompletedIcon && <Check size={11} />}<span className="task-title-text">{event.task.title}</span></span>
+                  {renderTaskExtras(event.task)}
                   {event.end - event.start >= 40 && <small>{event.continuing ? '00:00–' + clockTime(event.to) : taskTimeLabel(event.task.time, event.task.endTime)}</small>}
                 </button>
               );

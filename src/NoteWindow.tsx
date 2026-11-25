@@ -1,4 +1,4 @@
-import { Bold, ImagePlus, Italic, List, Minus, Palette, Plus, Strikethrough, StickyNote as StickyNoteIcon, Underline, X } from 'lucide-react';
+import { Bold, ImagePlus, Italic, List, ListTree, Minus, Palette, Pin, Plus, Strikethrough, StickyNote as StickyNoteIcon, Underline, X } from 'lucide-react';
 import { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react';
 import type { CSSProperties, MouseEvent, PointerEvent } from 'react';
 import type { NoteFormat, NotePatch, NoteStatePayload } from './types';
@@ -204,7 +204,7 @@ export default function NoteWindow() {
 
   if (!data || !noteId) return null;
 
-  const { note, appearance } = data;
+  const { note, appearance, pinned } = data;
   const alpha = Math.round(appearance.noteOpacity / 100 * 255).toString(16).padStart(2, '0');
   const style = {
     '--note-background': `${appearance.backgroundColor}${alpha}`,
@@ -262,6 +262,8 @@ export default function NoteWindow() {
         <header title="按住拖动便签" onPointerDown={startDrag} onPointerMove={moveDrag} onPointerUp={stopDrag} onPointerCancel={stopDrag} onLostPointerCapture={stopDrag}>
           <StickyNoteIcon size={15} />
           <strong>便签</strong>
+          <button type="button" aria-label="便签列表" title="便签列表" onClick={() => desktop?.openNoteList()}><ListTree size={15} /></button>
+          <button type="button" aria-label="置顶便签" aria-pressed={pinned} title={pinned ? '取消置顶' : '置顶便签'} onClick={() => desktop?.toggleNotePin(noteId)}><Pin size={15} fill={pinned ? 'currentColor' : 'none'} /></button>
           <button type="button" aria-label="新增便签" title="新增便签" onClick={() => desktop?.newNote()}><Plus size={15} /></button>
           <button type="button" aria-label="最小化便签" title="最小化便签（保留内容）" onClick={() => desktop?.closeNote(noteId)}><Minus size={15} /></button>
           <button type="button" aria-label="销毁便签" title="销毁便签" onClick={() => { if (window.confirm('永久销毁这张便签？')) desktop?.deleteNote(noteId); }}><X size={15} /></button>

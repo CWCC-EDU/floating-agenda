@@ -1,10 +1,12 @@
 import { useCallback, useEffect, useRef, useState, type ClipboardEvent, type CSSProperties, type KeyboardEvent, type MouseEvent } from 'react';
-import { ArrowRight, Check, Plus, Repeat2, Trash2, X } from 'lucide-react';
+import { ArrowRight, Check, Ellipsis, Plus, Repeat2, Trash2, X } from 'lucide-react';
 import { TASK_PALETTE } from '../lib/appearance';
 import { fullDateLabel, toDateKey } from '../lib/date';
 import { cancelTaskSeriesFrom, createTask, sortTasks } from '../lib/tasks';
 import { DEFAULT_RECURRENCE, normalizeRecurrence, REPEAT_OPTIONS } from '../lib/recurrence';
 import { clockTime, isTaskTimeRange, timeInMinutes } from '../lib/taskTime';
+import { sortTaskSubtasks, TaskExtras, taskExtrasEntries } from './TaskExtras';
+import { TaskDetails } from './TaskDetails';
 import { RecurrenceFields } from './RecurrenceFields';
 import type { RecurrencePattern, Settings, Task, TaskColor, TaskRolloverMode } from '../types';
 
@@ -41,10 +43,16 @@ function renderLines(editor: HTMLElement, lines: string[]) {
   editor.innerHTML = lines.map((line) => `<div class="editor-line">${line ? escapeHtml(line) : '<br>'}</div>`).join('');
 }
 
+function titleText(node: Node): string {
+  if (node instanceof HTMLElement && node.classList.contains('editor-inline-extras')) return '';
+  if (node.nodeType === Node.TEXT_NODE) return node.textContent ?? '';
+  return Array.from(node.childNodes).map(titleText).join('');
+}
+
 function readLines(editor: HTMLElement): string[] {
   const children = Array.from(editor.children);
   if (children.length === 0) return [editor.textContent ?? ''];
-  return children.map((child) => (child.tagName === 'BR' ? '' : child.textContent ?? ''));
+  return children.map((child) => (child.tagName === 'BR' ? '' : titleText(child)));
 }
 
 function selectionLineIndex(editor: HTMLElement): number {
@@ -66,7 +74,7 @@ function caretOffsetInLine(line: HTMLElement): number | null {
   const before = document.createRange();
   before.selectNodeContents(line);
   before.setEnd(range.startContainer, range.startOffset);
-  return before.toString().length;
+  return titleText(before.cloneContents()).length;
 }
 
 function focusLineEnd(editor: HTMLElement, index: number) {
@@ -74,6 +82,8 @@ function focusLineEnd(editor: HTMLElement, index: number) {
   if (!line) return;
   const range = document.createRange();
   range.selectNodeContents(line);
+  const extra = line.querySelector(':scope > .editor-inline-extras');
+  if (extra) range.setEndBefore(extra);
   range.collapse(false);
   const selection = window.getSelection();
   selection?.removeAllRanges();
@@ -124,6 +134,10 @@ interface DayEditorDialogProps {
 
 const AUTO_SAVE_DELAY = 400;
 
+function openTimePicker(event: MouseEvent<HTMLInputElement>) {
+  try { event.currentTarget.showPicker(); } catch { /* Keep keyboard editing available. */ }
+}
+
 function TaskTimeEditor({ task, onChange }: { task: Task; onChange: (patch: Partial<Task>) => void }) {
   const [invalid, setInvalid] = useState<{ start: string; end: string } | null>(null);
   const start = invalid?.start ?? task.time;
@@ -139,12 +153,12 @@ function TaskTimeEditor({ task, onChange }: { task: Task; onChange: (patch: Part
   }
 
   return <>
-    <label>开始 <input type="time" value={start} aria-label="选中行开始时间" onChange={(event) => {
+    <label>开始 <input type="time" value={start} aria-label="选中行开始时间" onClick={openTimePicker} onChange={(event) => {
       const next = event.target.value;
       const nextEnd = !next ? '' : !start ? clockTime(timeInMinutes(next) + 60) : end;
       change(next, nextEnd);
     }} /></label>
-    <label>结束 <input type="time" value={end} disabled={!start} aria-label="选中行结束时间" onChange={(event) => change(start, event.target.value)} /></label>
+    <label>结束 <input type="time" value={end} disabled={!start} aria-label="选中行结束时间" onClick={openTimePicker} onChange={(event) => change(start, event.target.value)} /></label>
     {invalid && <span className="editor-time-message" role="status">起止不能相同</span>}
     {!invalid && start && end && end < start && <span className="editor-time-message">次日结束</span>}
     <button type="button" className="editor-clear-reminder" title="清空选中行的时间段与提醒"
@@ -164,6 +178,9 @@ export function DayEditorDialog({ date, tasks, initialTaskId, initialTime, setti
   const [showColors, setShowColors] = useState(false);
   const editorRef = useRef<HTMLDivElement>(null);
   const gutterRef = useRef<HTMLDivElement>(null);
+  const detailsRailRef = useRef<HTMLDivElement>(null);
+  const [detailsId, setDetailsId] = useState<string | null>(null);
+  const details = settings.showTaskDetails ? rows.find(row => row.id === detailsId) : undefined;
   const rowInputRefs = useRef<(HTMLInputElement | null)[]>([]);
   const selectedIndex = Math.min(activeLine, rows.length - 1);
   const selected = rows[selectedIndex] ?? rows[0];
@@ -242,12 +259,42 @@ export function DayEditorDialog({ date, tasks, initialTaskId, initialTime, setti
     const editor = editorRef.current;
     if (!editor) return;
     Array.from(editor.children).forEach((child, index) => {
-      child.classList.toggle('is-completed', Boolean(rows[index]?.completed));
+      const row = rows[index];
+      child.classList.toggle('is-completed', Boolean(row?.completed));
+      const previous = child.querySelector(':scope > .editor-inline-extras');
+      const entries = row?.title.trim()
+        ? taskExtrasEntries(row, 'all', settings.bulletStyle, sortTaskSubtasks(row, settings.subtasksCompletedToBottom))
+        : [];
+      if (!entries.length) { previous?.remove(); return; }
+      const signature = JSON.stringify(entries);
+      if (previous?.getAttribute('data-signature') === signature) return;
+      previous?.remove();
+      const extras = document.createElement('span');
+      extras.className = 'editor-inline-extras task-extras';
+      extras.contentEditable = 'false';
+      extras.dataset.signature = signature;
+      entries.forEach(({ text, note, prefix, subtask }) => {
+        const line = document.createElement('span');
+        line.className = 'task-extra' + (note ? ' task-extra-note' : '') + (subtask?.completed ? ' is-completed' : '');
+        if (subtask) line.dataset.listSubtask = subtask.id;
+        if (prefix) {
+          const number = document.createElement('span');
+          number.className = 'task-extra-prefix';
+          number.textContent = prefix;
+          line.append(number);
+        }
+        const title = document.createElement('span');
+        title.className = 'task-title-text';
+        title.textContent = text;
+        line.append(title);
+        extras.append(line);
+      });
+      child.append(extras);
     });
     const frame = requestAnimationFrame(syncGutterHeights);
     return () => cancelAnimationFrame(frame);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [rows, text]);
+  }, [rows, text, settings.showTaskDetails, settings.bulletStyle, settings.subtasksCompletedToBottom]);
 
   useEffect(() => {
     const editor = editorRef.current;
@@ -263,8 +310,14 @@ export function DayEditorDialog({ date, tasks, initialTaskId, initialTime, setti
   }, []);
 
   useEffect(() => {
-    if (gutterRef.current && editorRef.current) gutterRef.current.scrollTop = editorRef.current.scrollTop;
+    syncEditorScroll();
   });
+
+  function syncEditorScroll() {
+    const top = editorRef.current?.scrollTop ?? 0;
+    if (gutterRef.current) gutterRef.current.scrollTop = top;
+    if (detailsRailRef.current) detailsRailRef.current.scrollTop = top;
+  }
 
   function syncGutterHeights() {
     const editor = editorRef.current;
@@ -272,8 +325,10 @@ export function DayEditorDialog({ date, tasks, initialTaskId, initialTime, setti
     if (!editor || !gutter) return;
     Array.from(editor.children).forEach((line, index) => {
       const gutterLine = gutter.children[index] as HTMLElement | undefined;
-      if (!gutterLine) return;
-      gutterLine.style.height = `${(line as HTMLElement).getBoundingClientRect().height}px`;
+      const detailLine = detailsRailRef.current?.children[index] as HTMLElement | undefined;
+      const height = `${(line as HTMLElement).getBoundingClientRect().height}px`;
+      if (gutterLine) gutterLine.style.height = height;
+      if (detailLine) detailLine.style.height = height;
     });
   }
 
@@ -298,7 +353,7 @@ export function DayEditorDialog({ date, tasks, initialTaskId, initialTime, setti
   }
 
   function onEditorKeyDown(event: KeyboardEvent<HTMLDivElement>) {
-    if (event.key === 'Enter' && event.shiftKey) event.preventDefault();
+    handleEnter(Math.max(0, selectionLineIndex(event.currentTarget)), event);
   }
 
   function onEditorPaste(event: ClipboardEvent<HTMLDivElement>) {
@@ -340,6 +395,12 @@ export function DayEditorDialog({ date, tasks, initialTaskId, initialTime, setti
     if (editing) updateTask(id, { completed });
   }), [updateTask]);
 
+  function toggleInlineSubtask(row: Task, id: string, event: MouseEvent<HTMLElement>) {
+    event.preventDefault();
+    event.stopPropagation();
+    updateTask(row.id, { subtasks: row.subtasks?.map(item => item.id === id ? { ...item, completed: !item.completed } : item) });
+  }
+
   function updateSelected(updates: Partial<Task>) {
     if (selected) updateTask(selected.id, updates);
   }
@@ -367,13 +428,18 @@ export function DayEditorDialog({ date, tasks, initialTaskId, initialTime, setti
 
   function insertRowAfter(index: number) {
     const target = Math.max(0, Math.min(index, rows.length - 1));
-    setRows((current) => {
-      const next = [...current];
-      next.splice(target + 1, 0, createEmptyTask(date));
-      return next;
-    });
+    const next = [...rows];
+    if (next[target + 1]?.title.trim() || !next[target + 1]) next.splice(target + 1, 0, createEmptyTask(date));
+    const lines = next.map(row => row.title);
+    setRows(next);
+    rowsRef.current = next;
+    setText(lines.join('\n'));
     setActiveLine(target + 1);
-    focusRow(target + 1);
+    const editor = editorRef.current;
+    if (editor) {
+      renderLines(editor, lines);
+      focusLineEnd(editor, target + 1);
+    } else focusRow(target + 1);
   }
 
   function removeRow(index: number) {
@@ -390,11 +456,17 @@ export function DayEditorDialog({ date, tasks, initialTaskId, initialTime, setti
     focusRow(nextIndex);
   }
 
+  function handleEnter(index: number, event: KeyboardEvent<HTMLElement>) {
+    if (event.key !== 'Enter' || event.nativeEvent.isComposing || event.keyCode === 229) return;
+    event.preventDefault();
+    if (settings.editorEnterSaves && !event.shiftKey) save();
+    else if (settings.editorEnterSaves || !event.shiftKey) insertRowAfter(index);
+  }
+
   function onRowKeyDown(index: number, event: KeyboardEvent<HTMLInputElement>) {
     if (event.nativeEvent.isComposing) return;
     if (event.key === 'Enter') {
-      event.preventDefault();
-      insertRowAfter(index);
+      handleEnter(index, event);
       return;
     }
     if (event.key === 'Backspace' && !rows[index]?.title && rows.length > 1) {
@@ -499,6 +571,13 @@ export function DayEditorDialog({ date, tasks, initialTaskId, initialTime, setti
     onSave(tasksToSave, new Set(managedIds.current));
   }
 
+  const nextMemoKey = settings.editorEnterSaves ? 'Shift+Enter' : 'Enter';
+  const editorHint = settings.editorEnterSaves ? 'Enter 保存 · Shift+Enter 新增' : 'Enter 新增 · 点击外侧或对号保存';
+  function detailButton(row: Task, index: number) {
+    return <button type="button" className="task-detail-button" aria-label={'编辑第 ' + (index + 1) + ' 条任务详情'}
+      title="子任务与备注" disabled={!row.title.trim()} onClick={() => { setActiveLine(index); setDetailsId(row.id); }}><Ellipsis size={17} /></button>;
+  }
+
   const editorStyle = {
     '--editor-font-family': settings.editorFontFamily,
     '--editor-font-size': `${settings.editorFontSize}px`,
@@ -506,7 +585,7 @@ export function DayEditorDialog({ date, tasks, initialTaskId, initialTime, setti
   } as CSSProperties;
 
   return (
-    <div className="modal-backdrop day-editor-backdrop" onMouseDown={(event) => event.target === event.currentTarget && onClose()}>
+    <div className="modal-backdrop day-editor-backdrop" onMouseDown={(event) => event.target === event.currentTarget && save()}>
       <section className="day-editor" style={editorStyle} role="dialog" aria-modal="true" aria-labelledby="day-editor-title" onPointerDown={(event) => {
         if ((event.target as HTMLElement).closest('input, textarea, [contenteditable]')) void window.desktop?.focusCalendarInput();
       }}>
@@ -523,7 +602,7 @@ export function DayEditorDialog({ date, tasks, initialTaskId, initialTime, setti
           {multiRow ? (
             <div className="editor-rows">
               {rows.map((row, index) => (
-                <div className={`editor-row ${index === selectedIndex ? 'is-active' : ''} ${row.completed ? 'is-completed' : ''}`} key={row.id}>
+                <div className={`editor-row ${index === selectedIndex ? 'is-active' : ''} ${row.completed ? 'is-completed' : ''}`} key={row.id}><div className="editor-row-title">
                   <span className="editor-row-mark" data-color={row.color} />
                   <span className="editor-row-number">{settings.bulletStyle === 'number' ? `${index + 1}.` : settings.bulletStyle === 'dot' ? '•' : ''}</span>
                   <span className="editor-row-repeat">{row.repeat !== 'none' && <Repeat2 size={10} />}</span>
@@ -531,7 +610,7 @@ export function DayEditorDialog({ date, tasks, initialTaskId, initialTime, setti
                     className="editor-row-input"
                     ref={(element) => { rowInputRefs.current[index] = element; }}
                     value={row.title}
-                    placeholder={index === rows.length - 1 && !row.title ? '输入日程，Enter 新增' : ''}
+                    placeholder={index === rows.length - 1 && !row.title ? '输入日程，' + nextMemoKey + ' 新增' : ''}
                     aria-label={`第 ${index + 1} 项日程`}
                     spellCheck={false}
                     onChange={(event) => updateRowTitle(index, event.target.value)}
@@ -541,6 +620,10 @@ export function DayEditorDialog({ date, tasks, initialTaskId, initialTime, setti
                     onKeyDown={(event) => onRowKeyDown(index, event)}
                     onPaste={(event) => onRowPaste(index, event)}
                   />
+                  {settings.showTaskDetails && detailButton(row, index)}
+                  </div>
+                  <TaskExtras task={row} mode="all" bulletStyle={settings.bulletStyle} subtasks={sortTaskSubtasks(row, settings.subtasksCompletedToBottom)}
+                    onSubtaskContext={(subtask, event) => toggleInlineSubtask(row, subtask.id, event)} />
                 </div>
               ))}
             </div>
@@ -566,7 +649,7 @@ export function DayEditorDialog({ date, tasks, initialTaskId, initialTime, setti
               aria-multiline="true"
               aria-label="当天日程，每行一项"
               data-empty={text.trim() ? 'false' : 'true'}
-              data-placeholder="输入日程，Enter 换行"
+              data-placeholder={'输入日程，' + nextMemoKey + ' 新增'}
               spellCheck={false}
               onInput={onEditorInput}
               onKeyDown={onEditorKeyDown}
@@ -575,15 +658,20 @@ export function DayEditorDialog({ date, tasks, initialTaskId, initialTime, setti
               onContextMenu={event => {
                 const line = (event.target as HTMLElement).closest('.editor-line');
                 const index = line ? Array.from(event.currentTarget.children).indexOf(line) : selectedIndex;
-                openTaskMenu(event, index, window.getSelection()?.isCollapsed === false);
+                const subtask = (event.target as HTMLElement).closest<HTMLElement>('[data-list-subtask]');
+                if (subtask?.dataset.listSubtask && rows[index]) toggleInlineSubtask(rows[index], subtask.dataset.listSubtask, event);
+                else openTaskMenu(event, index, window.getSelection()?.isCollapsed === false);
               }}
               onPaste={onEditorPaste}
-              onScroll={() => {
-                if (gutterRef.current && editorRef.current) gutterRef.current.scrollTop = editorRef.current.scrollTop;
-              }}
+              onScroll={syncEditorScroll}
             />
+            {settings.showTaskDetails && <div className="editor-details-rail" ref={detailsRailRef}>
+              {rows.map((row, index) => <div className="editor-details-line" key={row.id}>{detailButton(row, index)}</div>)}
+            </div>}
           </>}
         </div>
+
+        {details && <TaskDetails key={details.id} task={details} onChange={patch => updateTask(details.id, patch)} onClose={() => setDetailsId(null)} />}
 
         <div className="editor-selected-meta">
           {selected && <TaskTimeEditor key={selected.id} task={selected} onChange={updateSelected} />}
@@ -687,7 +775,7 @@ export function DayEditorDialog({ date, tasks, initialTaskId, initialTime, setti
 
           <button type="button" onClick={insertLine}><Plus size={15} /><span>新行</span></button>
           <button type="button" className="editor-delete" onClick={removeSelectedLine}><Trash2 size={15} /><span>删除</span></button>
-          <span className="editor-hint">{multiRow ? 'Enter 新增一行' : 'Enter 换行'} · 自动保存</span>
+          <span className="editor-hint">{editorHint}</span>
         </footer>
       </section>
     </div>

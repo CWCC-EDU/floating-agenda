@@ -106,6 +106,7 @@ export function extendRecurringTasks(tasks: Task[], today: string): RecurrenceEx
         if (dates.has(cursor) || (count === Infinity && cursor < today)) continue;
         additions.push({
           ...latest,
+          subtasks: latest.subtasks?.map(item => ({ ...item, completed: false })),
           id: `${seriesId}:${cursor}`,
           date: cursor,
           completed: false,
@@ -135,6 +136,7 @@ export function extendRecurringTasks(tasks: Task[], today: string): RecurrenceEx
         dates.add(cursor);
         additions.push({
           ...latest,
+          subtasks: latest.subtasks?.map(item => ({ ...item, completed: false })),
           id: crypto.randomUUID(),
           date: cursor,
           completed: false,

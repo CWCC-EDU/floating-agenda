@@ -2,6 +2,24 @@ import { describe, expect, it } from 'vitest';
 import { DEFAULT_SETTINGS, normalizeAppState } from './storage';
 
 describe('state normalization', () => {
+  it('loads the new editor defaults, migrates note recall, and normalizes pinned shortcuts and subtasks', () => {
+    const fresh = normalizeAppState({});
+    expect(fresh.settings).toMatchObject({ editorEnterSaves: true, showTaskDetails: true, showNotesOnTaskbar: true, toggleNotesShortcut: 'Control+Alt+B' });
+    const data = normalizeAppState({ settings: { settingsRevision: 3, toggleNotesShortcut: '', pinnedToolbarActions: ['today', 'unknown', 'today', 'draw'], editorEnterSaves: false },
+      tasks: [{ id: 'task', date: '2026-11-25', title: '任务', notes: '旧备注', subtasks: [{ id: 'sub', title: '子任务', completed: true }, null] }] });
+    expect(data.settings).toMatchObject({ editorEnterSaves: false, pinnedToolbarActions: ['today', 'draw'], toggleNotesShortcut: 'Control+Alt+B' });
+    expect(data.tasks[0]).toMatchObject({ notes: '旧备注', subtasks: [{ id: 'sub', title: '子任务', completed: true }] });
+    expect(normalizeAppState({ settings: { ...data.settings, toggleNotesShortcut: '', showNotesOnTaskbar: false } }).settings)
+      .toMatchObject({ toggleNotesShortcut: '', showNotesOnTaskbar: false });
+  });
+
+  it('migrates the note italic toggle to the task text style dropdown', () => {
+    expect(normalizeAppState({}).settings.taskTextStyle).toBe('italic-notes');
+    expect(normalizeAppState({ settings: { taskNotesItalic: false } }).settings.taskTextStyle).toBe('normal-notes');
+    expect(normalizeAppState({ settings: { taskNotesItalic: false, taskTextStyle: 'bold-title' } }).settings.taskTextStyle).toBe('bold-title');
+    expect(normalizeAppState({ settings: { taskTextStyle: 'unrecognized' } }).settings.taskTextStyle).toBe('italic-notes');
+  });
+
   it('defaults to month with the view switch shown and preserves explicit view preferences', () => {
     const defaults = normalizeAppState({ settings: {} }).settings;
     expect(defaults).toMatchObject({ calendarView: 'month', showCalendarViewSwitch: true, currentTimeLineColor: '#ff8d87' });
@@ -106,14 +124,14 @@ describe('state normalization', () => {
   it('migrates the legacy auto icon layer to below only once', () => {
     const legacy = normalizeAppState({ settings: { desktopIconLayer: 'auto' } });
     expect(legacy.settings.desktopIconLayer).toBe('below');
-    expect(legacy.settings.settingsRevision).toBe(3);
+    expect(legacy.settings.settingsRevision).toBe(DEFAULT_SETTINGS.settingsRevision);
 
     const explicit = normalizeAppState({ settings: { desktopIconLayer: 'auto', settingsRevision: 2 } });
     expect(explicit.settings.desktopIconLayer).toBe('below');
 
     const above = normalizeAppState({ settings: { desktopIconLayer: 'above' } });
     expect(above.settings.desktopIconLayer).toBe('above');
-    expect(above.settings.settingsRevision).toBe(3);
+    expect(above.settings.settingsRevision).toBe(DEFAULT_SETTINGS.settingsRevision);
   });
 
   it('opens legacy notes only when the old notes panel was visible', () => {

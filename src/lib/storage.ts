@@ -1,3 +1,4 @@
+import { TOOLBAR_ACTIONS } from './toolbarActions';
 import type { AppState, NoteImage, Settings, StickyNote, Task, TaskColor } from '../types';
 import { DEFAULT_RECURRENCE, isDateKey, normalizeRecurrence, REPEAT_OPTIONS } from './recurrence';
 import { isClockTime, isTaskTimeRange } from './taskTime';
@@ -37,6 +38,7 @@ export const DEFAULT_SETTINGS: Settings = {
   bulletStyle: 'number',
   rowGap: 2,
   completedToBottom: true,
+  subtasksCompletedToBottom: true,
   rolloverHighlightEnabled: false,
   rolloverHighlightColor: '#ff6b6b',
   rolloverGhostEnabled: false,
@@ -67,6 +69,11 @@ export const DEFAULT_SETTINGS: Settings = {
   editorFontSize: 12,
   editorTextColor: '#eef6f4',
   editorInputStyle: 'one-box',
+  editorEnterSaves: true,
+  showTaskDetails: true,
+  taskTextStyle: 'italic-notes',
+  monthTaskExtras: 'hide', weekTaskExtras: 'hide', dayTaskExtras: 'hide',
+  pinnedToolbarActions: [],
   imageSkin: 'none',
   skinPosition: 'center',
   skinOpacity: 85,
@@ -79,6 +86,7 @@ export const DEFAULT_SETTINGS: Settings = {
   showRestDays: true,
   restDays: [0, 6],
   showNotes: false,
+  showNotesOnTaskbar: true,
   noteBulletStyle: 'number',
   noteOpacity: 20,
   noteRowGap: 2,
@@ -90,20 +98,21 @@ export const DEFAULT_SETTINGS: Settings = {
   showHideShortcut: 'Control+Shift+Space',
   quickCaptureShortcut: '',
   toggleContentShortcut: '',
-  toggleNotesShortcut: '',
+  toggleNotesShortcut: 'Control+Alt+B',
   completeTaskShortcut: '',
   autoStartEnabled: false,
   autoCheckUpdates: false,
   language: 'zh-CN',
   proxyEnabled: false,
   proxyServer: '',
-  settingsRevision: 3,
+  settingsRevision: 4,
 };
 
 const BOOLEAN_KEYS = [
+  'editorEnterSaves', 'showTaskDetails', 'showNotesOnTaskbar',
   'rolloverEnabled', 'rolloverHighlightEnabled', 'rolloverGhostEnabled', 'showWeekNumbers', 'showLunar', 'showTitleBar', 'blurEnabled',
   'showMonthSeparator', 'showShadow', 'showLegalHolidays', 'showImportantFestivals',
-  'showSolarTerms', 'showYiJi', 'completedToBottom', 'showCompletedTasks',
+  'showSolarTerms', 'showYiJi', 'completedToBottom', 'subtasksCompletedToBottom', 'showCompletedTasks',
   'showCompletedCheckbox', 'showCompletedIcon', 'showReminderTime', 'showTimeAxis', 'showCalendarViewSwitch', 'taskAdaptiveColor',
   'remindersEnabled', 'showRestDays', 'showNotes', 'showNoteCheckbox', 'autoStartEnabled',
   'autoCheckUpdates', 'proxyEnabled',
@@ -130,10 +139,14 @@ function textValue(value: unknown, fallback: string, maxLength: number): string 
 function normalizeTask(value: Partial<Task>): Task | null {
   if (!value.id || !value.title || !value.date) return null;
   const cardColor = colorValue(value.cardColor, '');
+  const subtasks = Array.isArray(value.subtasks) ? value.subtasks.filter(item => item && typeof item.id === 'string' && item.id
+    && typeof item.title === 'string').map(item => ({ id: item.id, title: item.title, completed: item.completed === true })) : [];
+  const uniqueSubtasks = [...new Map(subtasks.map(item => [item.id, item])).values()];
   return {
     id: value.id,
     title: value.title,
-    notes: value.notes ?? '',
+    notes: typeof value.notes === 'string' ? value.notes : '',
+    ...(uniqueSubtasks.length ? { subtasks: uniqueSubtasks } : {}),
     date: value.date,
     time: isClockTime(value.time) ? value.time : '',
     ...(value.time && value.endTime && isTaskTimeRange(value.time, value.endTime) ? { endTime: value.endTime } : {}),
@@ -188,7 +201,7 @@ export function normalizeAppState(value: unknown): AppState {
   const notes = Array.isArray(saved.notes)
     ? saved.notes.map((note) => normalizeNote(note)).filter((note): note is StickyNote => note !== null)
     : [];
-  const raw = saved.settings && typeof saved.settings === 'object' ? saved.settings as Partial<Settings> : {};
+  const raw = saved.settings && typeof saved.settings === 'object' ? saved.settings as Partial<Settings> & { taskNotesItalic?: unknown } : {};
   const settings = { ...DEFAULT_SETTINGS, restDays: [...DEFAULT_SETTINGS.restDays] };
 
   BOOLEAN_KEYS.forEach((key) => {
@@ -219,6 +232,12 @@ export function normalizeAppState(value: unknown): AppState {
   settings.noteRowGap = numberInRange(raw.noteRowGap, 0, 8, settings.noteRowGap);
   settings.noteFontSize = numberInRange(raw.noteFontSize, 9, 22, settings.noteFontSize);
 
+  settings.pinnedToolbarActions = TOOLBAR_ACTIONS.map(action => action.id).filter(id => Array.isArray(raw.pinnedToolbarActions) && raw.pinnedToolbarActions.includes(id));
+  settings.taskTextStyle = enumValue(raw.taskTextStyle, ['bold-title', 'italic-notes', 'normal-notes'] as const,
+    raw.taskNotesItalic === false ? 'normal-notes' : settings.taskTextStyle);
+  for (const key of ['monthTaskExtras', 'weekTaskExtras', 'dayTaskExtras'] as const) {
+    settings[key] = enumValue(raw[key], ['hide', 'notes', 'subtasks', 'all'] as const, settings[key]);
+  }
   settings.calendarView = enumValue(raw.calendarView, ['month', 'week', 'day'] as const, settings.calendarView);
   settings.layout = enumValue(raw.layout, ['floating-month', 'full-month', 'fixed-week', 'floating-week'] as const, settings.layout);
   settings.weekNumberMode = enumValue(raw.weekNumberMode, ['iso', 'jan1'] as const, settings.weekNumberMode);
@@ -239,7 +258,7 @@ export function normalizeAppState(value: unknown): AppState {
   if (savedRevision < 3 && settings.showNotes) {
     notes.forEach((note) => { note.open = true; });
   }
-  settings.settingsRevision = 3;
+  settings.settingsRevision = 4;
   settings.festivalRegion = 'CN';
   settings.language = 'zh-CN';
 
@@ -268,6 +287,7 @@ export function normalizeAppState(value: unknown): AppState {
   settings.quickCaptureShortcut = textValue(raw.quickCaptureShortcut, settings.quickCaptureShortcut, 80).trim();
   settings.toggleContentShortcut = textValue(raw.toggleContentShortcut, settings.toggleContentShortcut, 80).trim();
   settings.toggleNotesShortcut = textValue(raw.toggleNotesShortcut, settings.toggleNotesShortcut, 80).trim();
+  if (savedRevision < 4 && !settings.toggleNotesShortcut) settings.toggleNotesShortcut = DEFAULT_SETTINGS.toggleNotesShortcut;
   settings.completeTaskShortcut = textValue(raw.completeTaskShortcut, settings.completeTaskShortcut, 80).trim();
   settings.proxyServer = textValue(raw.proxyServer, settings.proxyServer, 300).trim();
 

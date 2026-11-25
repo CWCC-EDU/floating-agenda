@@ -58,11 +58,42 @@ contextBridge.exposeInMainWorld('desktop', {
     return () => ipcRenderer.removeListener('note:format', listener);
   },
   noteReady: (id) => ipcRenderer.invoke('note:ready', id),
+  toggleNotePin: (id) => ipcRenderer.send('note:toggle-pin', id),
   sendNoteChange: (id, patch) => ipcRenderer.send('note:change', { id, patch }),
   closeNote: (id) => ipcRenderer.send('note:close', id),
   deleteNote: (id) => ipcRenderer.send('note:delete', id),
   newNote: () => ipcRenderer.send('note:new'),
   focusNote: (id) => ipcRenderer.send('note:focus', id),
+  openNoteList: () => ipcRenderer.send('note-list:open'),
+  getNotePreviews: () => ipcRenderer.invoke('note-list:get'),
+  openNoteFromList: id => ipcRenderer.send('note-list:choose', id),
+  openSettingsWindow: category => ipcRenderer.send('settings:open', category),
+  publishSettingsWindow: snapshot => ipcRenderer.send('settings:publish', snapshot),
+  getSettingsWindow: () => ipcRenderer.invoke('settings:get'),
+  closeSettingsWindow: () => ipcRenderer.send('settings:close'),
+  settingsCommand: command => ipcRenderer.send('settings:command', command),
+  applySettingsSync: (result, expected) => ipcRenderer.invoke('settings:apply-sync', result, expected),
+  finishSettingsSync: (id, result) => ipcRenderer.send('settings:finish-sync', id, result),
+  onNotePreviews: callback => {
+    const listener = (_event, value) => callback(value);
+    ipcRenderer.on('note-list:changed', listener);
+    return () => ipcRenderer.removeListener('note-list:changed', listener);
+  },
+  onSettingsWindow: callback => {
+    const listener = (_event, value) => callback(value);
+    ipcRenderer.on('settings:changed', listener);
+    return () => ipcRenderer.removeListener('settings:changed', listener);
+  },
+  onSettingsClosed: callback => {
+    const listener = (_event, value) => callback(value);
+    ipcRenderer.on('settings:closed', listener);
+    return () => ipcRenderer.removeListener('settings:closed', listener);
+  },
+  onSettingsCommand: callback => {
+    const listener = (_event, value) => callback(value);
+    ipcRenderer.on('settings:command', listener);
+    return () => ipcRenderer.removeListener('settings:command', listener);
+  },
   onNoteState: (callback) => {
     const listener = (_event, payload) => callback(payload);
     ipcRenderer.on('note:state', listener);

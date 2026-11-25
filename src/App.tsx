@@ -1,8 +1,9 @@
 import { Fragment, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type CSSProperties, type MouseEvent, type PointerEvent } from 'react';
-import { CalendarDays, Check, ChevronDown, ChevronLeft, ChevronRight, ListChecks, LogOut, Menu, Move, Palette, PenLine, Plus, RefreshCw, Repeat2, Settings2, StickyNote as StickyNoteIcon, Zap } from 'lucide-react';
+import { CalendarDays, Check, ChevronDown, ChevronLeft, ChevronRight, ListChecks, LocateFixed, LogOut, Menu, Move, Palette, PenLine, Plus, RefreshCw, Repeat2, Settings2, StickyNote as StickyNoteIcon, Zap } from 'lucide-react';
 import { DayEditorDialog } from './components/DayEditorDialog';
 import { NotesPanel } from './components/NotesPanel';
 import { SettingsDialog } from './components/SettingsDialog';
+import { sortTaskSubtasks, TaskExtras } from './components/TaskExtras';
 import { ScheduleView } from './components/ScheduleView';
 import { addDays, addMonths, adjacentCalendarPage, festivalLabel, fromDateKey, fullDateLabel, getCalendarColumns, getCalendarDays, getWeekDays, getWeekNumber, lunarDateLabel, monthLabel, shortDateLabel, solarTermLabel, startOfMonth, startOfWeek, toDateKey, yiJiLabel } from './lib/date';
 import { createTask, extendRecurringTasks, cancelTaskSeriesFrom, rolloverTasks, sortTasks, updateDayTasks } from './lib/tasks';
@@ -12,9 +13,12 @@ import { DEFAULT_SETTINGS, loadAppState, normalizeAppState, saveAppState } from 
 import { readableTextColor, taskCardColor, taskFontSize, TASK_PALETTE } from './lib/appearance';
 import { readLocalSkin, skinImage } from './lib/skins';
 import { applyNotePatch } from './lib/noteFormat';
+import { TOOLBAR_ACTIONS, type ToolbarAction } from './lib/toolbarActions';
 import { playSound } from './lib/sound';
-import type { AppState, CalendarView, NutstoreRemoteSummary, NutstoreSyncResult, NutstoreSyncStatus, NotesAppearance, Settings, StickyNote, Task, TaskFilter, WindowAdjustmentMode, WindowResizeEdge, WorkspaceItem } from './types';
+import type { AppState, CalendarView, NutstoreRemoteSummary, NutstoreSyncResult, NutstoreSyncStatus, NotesAppearance, Settings, StickyNote, Task, TaskFilter, TaskSubtask, WindowAdjustmentMode, WindowResizeEdge, WorkspaceItem } from './types';
 
+const TOOLBAR_ICONS = { today: LocateFixed, date: CalendarDays, theme: Palette, quick: Zap, draw: PenLine,
+  'new-note': Plus, notes: StickyNoteIcon, adjust: Move, hide: ChevronDown, sync: RefreshCw, settings: Settings2, quit: LogOut } satisfies Record<ToolbarAction, typeof CalendarDays>;
 const WEEKDAYS = ['星期日', '星期一', '星期二', '星期三', '星期四', '星期五', '星期六'];
 const WINDOW_RESIZE_EDGES: WindowResizeEdge[] = ['n', 's', 'e', 'w', 'ne', 'nw', 'se', 'sw'];
 const TOP_DATE_FORMATTER = new Intl.DateTimeFormat('zh-CN', { year: 'numeric', month: 'long', day: 'numeric', weekday: 'long' });
@@ -34,7 +38,7 @@ export default function App() {
   const [windowFocused, setWindowFocused] = useState(() => document.hasFocus());
   const [localSkin, setLocalSkin] = useState<string | null>(null);
   const [filter, setFilter] = useState<TaskFilter>('all');
-  const [hoveredTaskOrder, setHoveredTaskOrder] = useState<{ date: string; ranks: Map<string, number> } | null>(null);
+  const [hoveredTaskOrder, setHoveredTaskOrder] = useState<{ date: string; ranks: Map<string, number>; subtasks: Map<string, string[]> } | null>(null);
   const previousRowPositions = useRef<Map<HTMLElement, number> | null>(null);
   const rowAnimations = useRef(new WeakMap<HTMLElement, Animation>());
   const [state, setState] = useState<AppState>({ tasks: [], notes: [], settings: DEFAULT_SETTINGS });
@@ -42,6 +46,21 @@ export default function App() {
   const [editor, setEditor] = useState<EditorSelection | null>(null);
   const [showSettings, setShowSettings] = useState<boolean | 'notes' | 'appearance' | 'sync'>(false);
   const [showWindowMenu, setShowWindowMenu] = useState(false);
+  const topbarRef = useRef<HTMLElement>(null);
+  const [topbarSize, setTopbarSize] = useState({ width: window.innerWidth, height: 32 });
+  const titleBarVisible = state.settings.showTitleBar;
+  useLayoutEffect(() => {
+    const header = topbarRef.current;
+    if (!header) return;
+    const measure = () => {
+      const { width, height } = header.getBoundingClientRect();
+      setTopbarSize(current => current.width === width && current.height === height ? current : { width, height });
+    };
+    measure();
+    const observer = new ResizeObserver(measure);
+    observer.observe(header);
+    return () => observer.disconnect();
+  }, [titleBarVisible]);
   const [showContent, setShowContent] = useState(true);
   const [isAdjusting, setIsAdjusting] = useState(false);
   const [toast, setToast] = useState('');
@@ -237,7 +256,7 @@ export default function App() {
   const createNote = useCallback(() => {
     const note = newStickyNote();
     setShowWindowMenu(false);
-    setShowSettings(false);
+    if (!window.desktop) setShowSettings(false);
     window.desktop?.focusNote(note.id);
     setState((current) => ({
       ...current,
@@ -333,14 +352,14 @@ export default function App() {
     const onKeyDown = (event: KeyboardEvent) => {
       if (event.key === 'Escape') {
         setEditor(null);
-        setShowSettings(false);
+        if (!window.desktop) setShowSettings(false);
         setShowWindowMenu(false);
         setIsAdjusting(false);
         void window.desktop?.setWindowAdjustmentMode(false);
       }
       if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === 'n') {
         event.preventDefault();
-        setShowSettings(false);
+        if (!window.desktop) setShowSettings(false);
         setEditor({ date: selectedDate });
       }
     };
@@ -495,7 +514,7 @@ export default function App() {
 
   function openNote(id: string) {
     setShowWindowMenu(false);
-    setShowSettings(false);
+    if (!window.desktop) setShowSettings(false);
     setState((current) => ({
       ...current,
       settings: { ...current.settings, showNotes: true },
@@ -572,10 +591,12 @@ export default function App() {
     const positions = previousRowPositions.current;
     previousRowPositions.current = null;
     if (!positions || window.matchMedia('(prefers-reduced-motion: reduce)').matches) return;
-    positions.forEach((top, row) => {
+    positions.forEach((_top, row) => rowAnimations.current.get(row)?.cancel());
+    const offsets = new Map(Array.from(positions, ([row, top]) => [row, top - row.getBoundingClientRect().top]));
+    offsets.forEach((distance, row) => {
       if (!row.isConnected) return;
-      rowAnimations.current.get(row)?.cancel();
-      const offset = top - row.getBoundingClientRect().top;
+      const parent = row.dataset.listSubtask ? row.closest<HTMLElement>('[data-list-task]') : null;
+      const offset = distance - (parent ? offsets.get(parent) ?? 0 : 0);
       if (Math.abs(offset) < 1) return;
       rowAnimations.current.set(row, row.animate([
         { transform: 'translateY(' + offset + 'px)' }, { transform: 'translateY(0)' },
@@ -589,7 +610,7 @@ export default function App() {
     return () => window.removeEventListener('blur', reset);
   }, []);
 
-  useEffect(() => { setHoveredTaskOrder(null); }, [calendarView, monthCursor, monthPageStart, filter, state.settings.showTimeAxis, state.settings.showDayTimeAxis, state.settings.showWeekTimeAxis]);
+  useEffect(() => { setHoveredTaskOrder(null); }, [calendarView, monthCursor, monthPageStart, filter, state.settings.showTimeAxis, state.settings.showDayTimeAxis, state.settings.showWeekTimeAxis, state.settings.subtasksCompletedToBottom]);
 
   function toggleTaskCompletion(task: Task) {
     setTaskCompletion(task.id, !task.completed);
@@ -600,14 +621,45 @@ export default function App() {
     event.stopPropagation();
     const cell = event.currentTarget.closest<HTMLElement>('.day-cell, .schedule-list-cell, .schedule-all-day-cell');
     if (cell?.dataset.date === task.date && cell.matches(':hover') && hoveredTaskOrder?.date !== task.date) {
-      setHoveredTaskOrder({ date: task.date, ranks: new Map(getDayTasks(task.date).map((row, index) => [row.id, index])) });
+      setHoveredTaskOrder({ date: task.date, ranks: new Map(getDayTasks(task.date).map((row, index) => [row.id, index])), subtasks: new Map() });
     }
     toggleTaskCompletion(task);
   }
 
+  function orderedSubtasks(task: Task) {
+    const pinned = hoveredTaskOrder?.subtasks.get(task.id);
+    if (!pinned || !state.settings.subtasksCompletedToBottom) return sortTaskSubtasks(task, state.settings.subtasksCompletedToBottom);
+    const ranks = new Map(pinned.map((id, index) => [id, index]));
+    return [...(task.subtasks ?? [])].sort((a, b) => (ranks.get(a.id) ?? Infinity) - (ranks.get(b.id) ?? Infinity));
+  }
+
+  function toggleSubtask(task: Task, subtask: TaskSubtask, event: MouseEvent<HTMLElement>) {
+    event.preventDefault();
+    event.stopPropagation();
+    const cell = event.currentTarget.closest<HTMLElement>('.day-cell, .schedule-list-cell, .schedule-all-day-cell, .schedule-hour-column');
+    const date = cell?.dataset.date;
+    if (state.settings.subtasksCompletedToBottom && date && cell?.matches(':hover')) {
+      setHoveredTaskOrder(current => {
+        const existing = current?.date === date ? current : null;
+        const subtasks = new Map(existing?.subtasks);
+        if (!subtasks.has(task.id)) subtasks.set(task.id, orderedSubtasks(task).map(item => item.id));
+        return { date, ranks: existing?.ranks ?? new Map(getDayTasks(date).map((row, index) => [row.id, index])), subtasks };
+      });
+    }
+    setState(current => ({ ...current, tasks: current.tasks.map(row => row.id !== task.id ? row : { ...row,
+      subtasks: row.subtasks?.map(item => item.id === subtask.id ? { ...item, completed: !item.completed } : item),
+    }) }));
+  }
+
+  function renderTaskExtras(task: Task) {
+    const mode = calendarView === 'day' ? state.settings.dayTaskExtras : calendarView === 'week' ? state.settings.weekTaskExtras : state.settings.monthTaskExtras;
+    return <TaskExtras task={task} mode={mode} bulletStyle={state.settings.bulletStyle}
+      subtasks={orderedSubtasks(task)} onSubtaskContext={(item, event) => toggleSubtask(task, item, event)} />;
+  }
+
   function releaseTaskOrder(cell: HTMLElement) {
     if (hoveredTaskOrder?.date !== cell.dataset.date) return;
-    previousRowPositions.current = new Map(Array.from(cell.querySelectorAll<HTMLElement>('[data-list-task]'),
+    previousRowPositions.current = new Map(Array.from(cell.querySelectorAll<HTMLElement>('[data-list-task], [data-list-subtask]'),
       row => [row, row.getBoundingClientRect().top]));
     setHoveredTaskOrder(null);
   }
@@ -647,13 +699,14 @@ export default function App() {
     return (
       <div className={`calendar-task ${task.completed ? 'is-completed' : ''} ${rolledOver ? 'is-rolled-over' : ''}`} data-color={task.color} data-background={state.settings.taskTextBackground} data-rollover={rolledOver ? 'true' : undefined} data-card-color={background ? 'true' : undefined} style={style} key={task.id} data-list-task={task.id} onContextMenu={event => toggleTaskFromContext(task, event)}>
         {state.settings.showCompletedCheckbox && <input className="task-checkbox" type="checkbox" aria-label={`完成 ${task.title}`} checked={task.completed} onClick={(event) => event.stopPropagation()} onChange={() => toggleTaskCompletion(task)} />}
-        <button className="calendar-task-label" type="button" title={`${task.time ? `${taskTimeLabel(task.time, task.endTime)} ` : ''}${task.title}${rolledOver ? ` · 已顺延 ${task.rolloverCount} 次` : ''}`} onClick={(event) => { event.stopPropagation(); goToTask(task); }}>
+        <div className="calendar-task-inner"><button className="calendar-task-label" type="button" title={`${task.time ? `${taskTimeLabel(task.time, task.endTime)} ` : ''}${task.title}${rolledOver ? ` · 已顺延 ${task.rolloverCount} 次` : ''}`} onClick={(event) => { event.stopPropagation(); goToTask(task); }}>
           {showNumber && state.settings.bulletStyle !== 'none' && <span className="task-number">{state.settings.bulletStyle === 'number' ? `${taskIndex + 1}.` : '•'}</span>}
           <span className="task-title"><span className="task-title-text">{task.title}</span></span>
           {state.settings.showReminderTime && task.time && <span className="task-time">{taskTimeLabel(task.time, task.endTime)}</span>}
           {task.completed && state.settings.showCompletedIcon && <Check className="task-complete-icon" size={11} />}
           {task.repeat !== 'none' && <span className="task-indicators"><Repeat2 className="task-repeat" size={10} /></span>}
         </button>
+        {renderTaskExtras(task)}</div>
       </div>
     );
   }
@@ -714,19 +767,19 @@ export default function App() {
     void window.desktop?.stopWindowAdjustment();
   }
 
-  function openSettingsFromMenu() {
+  function openSettingsFromMenu(category: true | 'appearance' = true) {
     setShowWindowMenu(false);
     setEditor(null);
-    setShowSettings(true);
+    if (isReady && showSettings === category) window.desktop?.openSettingsWindow(category === true ? 'calendar' : category);
+    setShowSettings(category);
   }
 
   useEffect(() => {
     return window.desktop?.onMenuAction((action) => {
       if (action === 'open-settings') {
-        setEditor(null);
-        setShowSettings(true);
+        openSettingsFromMenu();
       } else if (action === 'new-task') {
-        setShowSettings(false);
+        if (!window.desktop) setShowSettings(false);
         setEditor({ date: selectedDate });
       } else if (action === 'previous-month') {
         navigatePeriod(-1);
@@ -736,6 +789,11 @@ export default function App() {
         goToToday();
       } else if (action === 'toggle-content') {
         setShowContent((current) => !current);
+      } else if (action === 'show-notes') {
+        const notes = stateRef.current.notes;
+        const note = [...notes].reverse().find(item => item.open) ?? notes.at(-1);
+        if (note) openNote(note.id);
+        else createNote();
       } else if (action === 'toggle-notes') {
         toggleNotesVisibility();
       } else if (action === 'note:new') {
@@ -750,10 +808,80 @@ export default function App() {
         toggleSetting(action.slice(7) as ToggleSetting);
       }
     });
-  }, [selectedDate, today, state.tasks, state.settings, monthCursor, calendarDays]);
+  }, [selectedDate, today, state.tasks, state.settings, monthCursor, calendarDays, isReady, showSettings]);
+
+  const availableActions = TOOLBAR_ACTIONS.filter(({ id }) => isElectron || !['quick', 'draw', 'sync'].includes(id));
+  const pinnedActions = availableActions.filter(({ id }) => state.settings.pinnedToolbarActions.includes(id));
+  const separateToolbarRow = pinnedActions.length * 30 + 245 > topbarSize.width;
+
+  function runToolbarAction(id: Exclude<ToolbarAction, 'date'>) {
+    setShowWindowMenu(false);
+    switch (id) {
+      case 'today': goToToday(); break;
+      case 'theme': openSettingsFromMenu('appearance'); break;
+      case 'quick': void window.desktop?.openQuickCapture(); break;
+      case 'draw': void window.desktop?.openDrawingBoard(); break;
+      case 'new-note': createNote(); break;
+      case 'notes': if (window.desktop) window.desktop.openNoteList(); else setShowSettings('notes'); break;
+      case 'adjust': toggleAdjustmentMode(); break;
+      case 'hide': void window.desktop?.minimizeWindow(); break;
+      case 'sync': void syncCalendar(true); break;
+      case 'settings': openSettingsFromMenu(); break;
+      case 'quit': void window.desktop?.quitApp(); break;
+    }
+  }
+
+  function renderToolbarAction(action: typeof TOOLBAR_ACTIONS[number], pinned = false) {
+    const { id, label } = action;
+    const Icon = TOOLBAR_ICONS[id];
+    const title = id === 'adjust' && isAdjusting ? '完成位置和大小调整' : label;
+    if (id === 'date') {
+      const monthOnly = calendarView === 'month' && fullMonth;
+      return <label key={id} className={pinned ? 'pinned-date-action' : 'window-menu-date'} title={title}>
+        <Icon size={15} />{!pinned && <span>{title}</span>}
+        <input type={monthOnly ? 'month' : 'date'} aria-label={monthOnly ? '选择月份' : '选择日期'}
+          value={monthOnly ? monthCursor.slice(0, 7) : selectedDate}
+          onClick={event => { try { event.currentTarget.showPicker(); } catch { /* Keep native field editing available. */ } }}
+          onChange={event => {
+            const value = event.target.value;
+            if (value) goToDate(value.length === 7 ? value + '-01' : value);
+          }} />
+      </label>;
+    }
+    const disabled = (!isElectron && ['adjust', 'hide', 'quit'].includes(id)) || (id === 'sync' && !isReady);
+    return <button key={id} type="button" role={pinned ? undefined : 'menuitem'} aria-label={pinned ? title : undefined}
+      title={pinned ? title : undefined} className={id === 'adjust' && isAdjusting ? 'is-active' : ''}
+      disabled={disabled} onClick={() => runToolbarAction(id)}><Icon size={15} />{!pinned && <span>{title}</span>}
+      {!pinned && id === 'adjust' && isAdjusting && <Check size={14} />}</button>;
+  }
 
   const skin = skinImage(state.settings.imageSkin, localSkin);
   const backgroundAlpha = Math.round(state.settings.opacity / 100 * 255).toString(16).padStart(2, '0');
+  const settingsCategory = showSettings === true ? 'calendar' : showSettings;
+  useEffect(() => {
+    if (settingsCategory && isReady) window.desktop?.openSettingsWindow(settingsCategory);
+  }, [settingsCategory, isReady]);
+  useEffect(() => {
+    if (settingsCategory && isReady) window.desktop?.publishSettingsWindow({ state, syncStatus, syncConflict, category: settingsCategory });
+  }, [settingsCategory, isReady, state, syncStatus, syncConflict]);
+  useEffect(() => window.desktop?.onSettingsClosed(() => setShowSettings(false)), []);
+  useEffect(() => window.desktop?.onSettingsCommand(command => {
+    switch (command.type) {
+      case 'settings': updateSettings({ ...stateRef.current.settings, ...command.patch }); break;
+      case 'skin': setLocalSkin(command.image); break;
+      case 'create-note': createNote(); break;
+      case 'open-note': openNote(command.id); break;
+      case 'delete-note': destroyNote(command.id); break;
+      case 'sync-status': setSyncStatus(command.status); break;
+      case 'sync-conflict': setSyncConflict(command.conflict); break;
+      case 'apply-sync': {
+        const expected = JSON.stringify(stateRef.current) === JSON.stringify(command.expected) ? stateRef.current : command.expected;
+        applyRemoteState(command.result, expected).then(result => window.desktop?.finishSettingsSync(command.requestId, result))
+          .catch(() => window.desktop?.finishSettingsSync(command.requestId, null));
+        break;
+      }
+    }
+  }));
   const appStyle = {
     '--calendar-background': `${state.settings.backgroundColor}${backgroundAlpha}`,
     '--cell-gap': `${state.settings.cellGap}px`,
@@ -770,18 +898,18 @@ export default function App() {
     '--solar-term-color': state.settings.solarTermTextColor,
     '--calendar-columns': columnCount,
     '--calendar-rows': rowCount,
-    '--topbar-height': state.settings.showTitleBar ? '32px' : '0px',
+    '--topbar-height': titleBarVisible ? topbarSize.height + 'px' : '0px',
   } as CSSProperties;
 
   return (
     <main className={`desktop-canvas ${isElectron ? (windowFocused ? 'is-electron has-focus' : 'is-electron') : 'is-web'}`}>
-      <section className={`calendar-shell ${isAdjusting ? 'is-adjusting' : ''} ${state.settings.blurEnabled && !skin ? '' : 'no-blur'} ${state.settings.showShadow ? 'with-shadow' : ''} ${showContent ? '' : 'content-hidden'} ${state.settings.showTitleBar ? '' : 'no-titlebar'}`} style={appStyle} aria-label="浮屿桌面日历">
+      <section className={`calendar-shell ${isAdjusting ? 'is-adjusting' : ''} ${state.settings.blurEnabled && !skin ? '' : 'no-blur'} ${state.settings.showShadow ? 'with-shadow' : ''} ${showContent ? '' : 'content-hidden'} ${state.settings.showTitleBar ? '' : 'no-titlebar'}`} style={appStyle} data-task-text-style={state.settings.taskTextStyle} aria-label="浮屿桌面日历">
         {skin && <div className="calendar-skin" aria-hidden="true" style={{
           backgroundImage: `linear-gradient(rgb(7 19 32 / ${state.settings.skinShade}%), rgb(7 19 32 / ${state.settings.skinShade}%)), url(${JSON.stringify(skin)})`,
           backgroundPosition: state.settings.skinPosition,
           opacity: state.settings.skinOpacity / 100,
         }} />}
-        {state.settings.showTitleBar && <header className="calendar-topbar" onPointerDown={(event) => startWindowAdjustment(event, 'move')} onPointerMove={updateWindowAdjustment} onPointerUp={stopWindowAdjustment} onPointerCancel={stopWindowAdjustment}>
+        {titleBarVisible && <header ref={topbarRef} className={'calendar-topbar' + (pinnedActions.length ? ' has-pins' : '') + (separateToolbarRow ? ' pins-on-second-row' : '')} onPointerDown={(event) => startWindowAdjustment(event, 'move')} onPointerMove={updateWindowAdjustment} onPointerUp={stopWindowAdjustment} onPointerCancel={stopWindowAdjustment}>
           {state.settings.showCalendarViewSwitch && <div className="calendar-view-switch" role="group" aria-label="日历视图">
             {CALENDAR_VIEWS.map(({ view, label }) => (
               <button key={view} type="button" aria-label={label + '视图'} aria-pressed={calendarView === view} onClick={() => switchCalendarView(view)}>{label}</button>
@@ -792,6 +920,9 @@ export default function App() {
             <div className="topbar-date" aria-live="polite">{periodLabel}</div>
             <button type="button" className="topbar-arrow" aria-label={'下' + navigationUnit} title={'下' + navigationUnit} onClick={() => navigatePeriod(1)}><ChevronRight size={13} /></button>
           </div>
+          {pinnedActions.length > 0 && <div className="pinned-toolbar" role="group" aria-label="顶栏快捷按钮">
+            {pinnedActions.map(action => renderToolbarAction(action, true))}
+          </div>}
           <div className="window-controls">
             <button type="button" aria-label="打开功能菜单" title="功能菜单" aria-expanded={showWindowMenu} onClick={() => setShowWindowMenu((current) => !current)}><Menu size={17} /></button>
           </div>
@@ -800,21 +931,7 @@ export default function App() {
         {showWindowMenu && <>
           <div className="window-menu-backdrop" aria-hidden="true" onPointerDown={() => setShowWindowMenu(false)} />
           <div className="window-function-menu" role="menu" aria-label="日历功能">
-            <button type="button" role="menuitem" onClick={() => { goToToday(); setShowWindowMenu(false); }}><CalendarDays size={15} /><span>回到今天</span></button>
-            <label className="window-menu-date"><CalendarDays size={15} /><span>选择日期</span><input type={calendarView === 'month' && fullMonth ? 'month' : 'date'} aria-label={calendarView === 'month' && fullMonth ? '选择月份' : '选择日期'} value={calendarView === 'month' && fullMonth ? monthCursor.slice(0, 7) : selectedDate} onChange={(event) => { if (event.target.value) goToDate(event.target.value.length === 7 ? event.target.value + '-01' : event.target.value); }} /></label>
-            <button type="button" role="menuitem" onClick={() => { setShowWindowMenu(false); setShowSettings('appearance'); }}><Palette size={15} /><span>主题皮肤</span></button>
-            {isElectron && <button type="button" role="menuitem" onClick={() => { setShowWindowMenu(false); void window.desktop?.openQuickCapture(); }}><Zap size={15} /><span>快速记一条</span></button>}
-            {isElectron && <button type="button" role="menuitem" onClick={() => { setShowWindowMenu(false); void window.desktop?.openDrawingBoard(); }}><PenLine size={15} /><span>小画板</span></button>}
-            <div className="window-menu-notes">
-              <button type="button" role="menuitem" onClick={createNote}><Plus size={15} /><span>新建便签</span></button>
-              <button type="button" role="menuitem" onClick={() => { setShowWindowMenu(false); setShowSettings('notes'); }}><StickyNoteIcon size={15} /><span>管理便签</span></button>
-            </div>
-            <button type="button" role="menuitem" className={isAdjusting ? 'is-active' : ''} disabled={!isElectron} onClick={toggleAdjustmentMode}><Move size={15} /><span>{isAdjusting ? '完成位置和大小调整' : '调整位置和大小'}</span>{isAdjusting && <Check size={14} />}</button>
-            <button type="button" role="menuitem" disabled={!isElectron} onClick={() => { setShowWindowMenu(false); void window.desktop?.minimizeWindow(); }}><ChevronDown size={15} /><span>隐藏日历清单</span></button>
-            <div className="window-menu-separator" />
-            {isElectron && <button type="button" role="menuitem" disabled={!isReady} onClick={() => { setShowWindowMenu(false); void syncCalendar(true); }}><RefreshCw size={15} /><span>立即同步</span></button>}
-            <button type="button" role="menuitem" onClick={openSettingsFromMenu}><Settings2 size={15} /><span>日历设置</span></button>
-            <button type="button" role="menuitem" disabled={!isElectron} onClick={() => void window.desktop?.quitApp()}><LogOut size={15} /><span>退出软件</span></button>
+            {availableActions.map(action => renderToolbarAction(action))}
           </div>
         </>}
 
@@ -891,7 +1008,7 @@ export default function App() {
           view={calendarView} dates={scheduleDates} today={today} selectedDate={selectedDate} settings={state.settings}
           getDayTasks={getDayTasks} getGhostTasks={getGhostTasks}
           renderTask={(task, index) => renderTask(task, index, false)} renderGhostTask={renderGhostTask} taskColor={taskColor}
-          onSelectDate={setSelectedDate} onOpenTask={goToTask} onTaskMenu={toggleTaskFromContext} onLeaveTaskCell={releaseTaskOrder} onCreate={(date, initialTime) => {
+          onSelectDate={setSelectedDate} onOpenTask={goToTask} onTaskMenu={toggleTaskFromContext} renderTaskExtras={renderTaskExtras} onLeaveTaskCell={releaseTaskOrder} onCreate={(date, initialTime) => {
             setSelectedDate(date);
             setEditor({ date, initialTime });
           }}
@@ -908,7 +1025,7 @@ export default function App() {
 
         {!isReady && <div className="loading-cover"><span /><p>正在整理你的日历…</p></div>}
         {editor && <DayEditorDialog key={editor.date + (editor.taskId ?? '')} date={editor.date} tasks={tasksByDate.get(editor.date) ?? []} initialTaskId={editor.taskId} initialTime={editor.initialTime} settings={state.settings} onAutoSave={(tasks, managed) => saveDayTasks(editor.date, tasks, managed, false)} onSave={(tasks, managed) => saveDayTasks(editor.date, tasks, managed)} onCancelSeries={cancelTaskSeries} onClose={() => setEditor(null)} />}
-        {showSettings && <SettingsDialog initialCategory={showSettings === true ? 'calendar' : showSettings} localSkin={localSkin} onLocalSkinChange={setLocalSkin} settings={state.settings} notes={state.notes} appState={state} isElectron={isElectron} onChange={updateSettings} onClose={() => setShowSettings(false)} onCreateNote={createNote} onOpenNote={openNote} onDestroyNote={destroyNote} onApplyRemote={applyRemoteState} syncStatus={syncStatus} onSyncStatusChange={setSyncStatus} syncConflict={syncConflict} onSyncConflictChange={setSyncConflict} />}
+        {!isElectron && showSettings && <SettingsDialog initialCategory={showSettings === true ? 'calendar' : showSettings} localSkin={localSkin} onLocalSkinChange={setLocalSkin} settings={state.settings} notes={state.notes} appState={state} isElectron={isElectron} onChange={updateSettings} onClose={() => setShowSettings(false)} onCreateNote={createNote} onOpenNote={openNote} onDestroyNote={destroyNote} onApplyRemote={applyRemoteState} syncStatus={syncStatus} onSyncStatusChange={setSyncStatus} syncConflict={syncConflict} onSyncConflictChange={setSyncConflict} />}
         {toast && <div className="toast" role="status"><ListChecks size={16} />{toast}</div>}
       </section>
     </main>
